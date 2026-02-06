@@ -3,3 +3,4 @@ pykrx
 pandas
 gspread
 google-auth
+tqdm
