@@ -31,7 +31,7 @@ if st.button("🔍 분석 시작하기"):
     try:
         gc = get_gspread_client()
         # 시트 이름은 '내관심종목'으로 가정합니다.
-        spreadsheet = gc.open("내관심종목")
+        spreadsheet = gc.open("관심종목")
         worksheet = spreadsheet.get_worksheet(0)
         all_data = worksheet.get_all_values()
         rows = all_data[1:]
@@ -84,4 +84,5 @@ if st.button("🔍 분석 시작하기"):
             st.warning("조건에 부합하는 종목이 없습니다.")
             
     except Exception as e:
+
         st.error(f"오류 발생: {e}")
