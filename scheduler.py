@@ -40,11 +40,17 @@ def run_analysis():
         creds = Credentials.from_service_account_info(creds_json, scopes=scopes)
         gc = gspread.authorize(creds)
         
-        spreadsheet = gc.open("내관심종목")
+        # 현재 접속을 시도하는 서비스 계정 이메일을 로그에 출력
+        print(f"📧 접속 계정: {creds_json.get('client_email')}")
+        
+        spreadsheet = gc.open("내관심종목") # 여기서 에러가 난다면 공유 설정 문제입니다.
         worksheet = spreadsheet.get_worksheet(0)
         all_data = worksheet.get_all_values()
         rows = all_data[1:]
         print(f"✅ 구글 시트 연결 성공: {len(rows)}개 종목 확인")
+    except gspread.exceptions.SpreadsheetNotFound:
+        print("❌ [에러] 시트를 찾을 수 없습니다. 시트 이름이 '내관심종목'이 맞는지, 서비스 계정 이메일이 공유되어 있는지 확인하세요.")
+        return
     except Exception as e:
         print(f"❌ [에러] 구글 시트 연결 단계: {e}")
         return
