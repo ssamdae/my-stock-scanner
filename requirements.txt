@@ -5,3 +5,5 @@ gspread
 google-auth
 tqdm
 requests
+finance-datareader
+
