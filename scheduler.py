@@ -17,7 +17,7 @@ def send_telegram_msg(token, chat_id, message):
         pass
 
 def run_analysis():
-    print("🚀 [최종 해결 모드] 분석을 시작합니다...")
+    print("🚀 [로직 보완 모드] 분석을 시작합니다...")
     
     try:
         # 1. 환경 변수 및 시트 연결
@@ -35,46 +35,42 @@ def run_analysis():
         rows = all_data[1:]
         print(f"✅ 시트 연결 성공: 총 {len(rows)}개 종목 로드")
 
-        # 2. 가장 최근 영업일 자동 확보 (중요!)
-        # 주말이나 공휴일에도 마지막으로 장이 열린 날짜를 정확히 가져옵니다.
-        today_str = (datetime.now() + timedelta(hours=9)).strftime("%Y%m%d") # KST 보정
-        latest_trading_day = stock.get_nearest_business_day_in_range(
-            (datetime.now() - timedelta(days=10)).strftime("%Y%m%d"), 
-            today_str
-        )
-        print(f"📅 분석 기준 영업일: {latest_trading_day}")
-
-        # 해당 날짜의 전체 티커 리스트 확보
-        all_tickers = stock.get_market_ticker_list(latest_trading_day, market="ALL")
+        # 2. 최근 영업일 찾기 (반복문 방식)
+        now = datetime.now() + timedelta(hours=9) # KST 한국 시간 보정
+        all_tickers = []
+        latest_trading_day = ""
         
-        # 만약 ALL에서 실패하면 KOSPI, KOSDAQ 각각 시도
-        if not all_tickers:
-            print("⚠️ ALL 리스트 실패, KOSPI/KOSDAQ 개별 시도 중...")
-            kospi = stock.get_market_ticker_list(latest_trading_day, market="KOSPI")
-            kosdaq = stock.get_market_ticker_list(latest_trading_day, market="KOSDAQ")
-            all_tickers = kospi + kosdaq
-
-        if not all_tickers:
-            print("❌ [최종 에러] 시장 리스트를 불러올 수 없습니다. 거래소 서버 응답 없음.")
+        print("🔍 최근 영업일 데이터를 찾는 중...")
+        for i in range(10): # 최근 10일간 데이터를 뒤로 가며 확인
+            check_date = (now - timedelta(days=i)).strftime("%Y%m%d")
+            tickers = stock.get_market_ticker_list(check_date, market="ALL")
+            if tickers: # 데이터가 있는 날을 찾으면 중단
+                all_tickers = tickers
+                latest_trading_day = check_date
+                break
+        
+        if not latest_trading_day:
+            print("❌ [에러] 최근 영업일 데이터를 불러올 수 없습니다.")
             return
+
+        print(f"📅 분석 기준 영업일: {latest_trading_day} (확인된 종목수: {len(all_tickers)})")
 
         # 종목명 -> 티커 맵 생성
         ticker_map = {stock.get_market_ticker_name(t): t for t in all_tickers}
         matched_results = []
 
-        print(f"📊 {latest_trading_day} 데이터 분석 시작...")
-        
         # 3. 분석 루프
+        print(f"📊 {latest_trading_day} 종목 분석 시작...")
         for i, row in enumerate(rows):
             name = row[0].strip()
             ticker = ticker_map.get(name)
             
             if ticker:
                 try:
-                    # 샌드위치 분석에 필요한 충분한 데이터(약 1년치) 확보
+                    # 분석에 필요한 충분한 데이터 확보
                     df = stock.get_market_ohlcv_by_date("20240101", latest_trading_day, ticker)
                     if df is not None and len(df) >= 224:
-                        # 단순 이동평균 계산
+                        # 이동평균 계산
                         ma120 = df['종가'].rolling(window=120).mean().iloc[-1]
                         ma224 = df['종가'].rolling(window=224).mean().iloc[-1]
                         current_close = df['종가'].iloc[-1]
@@ -87,9 +83,9 @@ def run_analysis():
                 except:
                     continue
             
-            # API 과부하 방지 (잠시 대기)
+            # API 과부하 방지 (10개 종목마다 약간의 휴식)
             if i % 10 == 0:
-                time.sleep(0.1)
+                time.sleep(0.05)
 
         # 4. 결과 전송
         if matched_results:
@@ -100,7 +96,8 @@ def run_analysis():
             print(f"✅ 전송 성공: {len(matched_results)}건")
         else:
             print("ℹ️ 조건 만족 종목 없음")
-            send_telegram_msg(bot_token, chat_id, f"✅ {latest_trading_day} 분석 완료: 조건 만족 종목 0건")
+            # 작동 여부 확인을 위한 알림 (종목이 0건이어도 메시지 발송)
+            send_telegram_msg(bot_token, chat_id, f"✅ {latest_trading_day} 분석 완료: 조건 만족 종목 없음")
 
     except Exception as e:
         print(f"❌ [에러] 전체 프로세스 오류: {e}")
