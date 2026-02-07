@@ -43,7 +43,7 @@ def run_analysis():
         # 현재 접속을 시도하는 서비스 계정 이메일을 로그에 출력
         print(f"📧 접속 계정: {creds_json.get('client_email')}")
         
-        spreadsheet = gc.open("내관심종목") # 여기서 에러가 난다면 공유 설정 문제입니다.
+        spreadsheet = gc.open("관심종목") # 여기서 에러가 난다면 공유 설정 문제입니다.
         worksheet = spreadsheet.get_worksheet(0)
         all_data = worksheet.get_all_values()
         rows = all_data[1:]
