@@ -15,6 +15,15 @@ def send_telegram_msg(token, chat_id, message):
     requests.post(url, data=payload)
 
 def run_analysis():
+    print("🚀 분석 프로세스를 시작합니다...")
+    
+    creds_raw = os.environ.get("GCP_SERVICE_ACCOUNT")
+    if not creds_raw:
+        print("❌ 에러: GCP_SERVICE_ACCOUNT 시크릿을 찾을 수 없습니다.")
+        return
+    else:
+        print(f"✅ 시크릿 로드 성공 (글자 수: {len(creds_raw)})")
+    
     # GitHub Secrets에서 정보 가져오기
     creds_json = json.loads(os.environ["GCP_SERVICE_ACCOUNT"])
     bot_token = os.environ["TELEGRAM_BOT_TOKEN"]
