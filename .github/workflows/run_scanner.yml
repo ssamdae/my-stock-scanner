@@ -1,0 +1,30 @@
+name: Daily Stock Scanner
+
+on:
+  schedule:
+    # 0분 기준 / 23시(KST 08시), 3시(KST 12시), 6시(KST 15시), 8시(KST 17시)
+    - cron: '0 23,3,6,8 * * *'
+  workflow_dispatch: # 언제든 수동으로도 실행 가능하게 유지
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v3
+
+      - name: Set up Python
+        uses: actions/setup-python@v4
+        with:
+          python-version: '3.9'
+
+      - name: Install dependencies
+        run: |
+          pip install pykrx pandas gspread google-auth requests
+
+      - name: Run scanner
+        env:
+          GCP_SERVICE_ACCOUNT: ${{ secrets.GCP_SERVICE_ACCOUNT }}
+          TELEGRAM_BOT_TOKEN: ${{ secrets.TELEGRAM_BOT_TOKEN }}
+          TELEGRAM_CHAT_ID: ${{ secrets.TELEGRAM_CHAT_ID }}
+        run: python scheduler.py
