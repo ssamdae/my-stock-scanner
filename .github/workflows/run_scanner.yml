@@ -2,9 +2,9 @@ name: Daily Stock Scanner
 
 on:
   schedule:
-    # 0분 기준 / 23시(KST 08시), 3시(KST 12시), 6시(KST 15시), 8시(KST 17시)
+    # 한국 시간(KST) 기준 오전 8시, 오후 12시, 3시, 5시 (UTC 보정)
     - cron: '0 23,3,6,8 * * *'
-  workflow_dispatch: # 언제든 수동으로도 실행 가능하게 유지
+  workflow_dispatch: 
 
 jobs:
   build:
@@ -16,11 +16,13 @@ jobs:
       - name: Set up Python
         uses: actions/setup-python@v4
         with:
-          python-version: '3.10'
+          python-version: '3.10' # 최신 버전 사용
 
       - name: Install dependencies
         run: |
-          pip install pykrx pandas gspread google-auth requests
+          pip install --upgrade pip
+          # 필요한 모든 라이브러리를 여기서 직접 설치합니다.
+          pip install pykrx pandas gspread google-auth requests finance-datareader
 
       - name: Run scanner
         env:
