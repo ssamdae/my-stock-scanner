@@ -25,7 +25,7 @@ def run_analysis():
     creds = Credentials.from_service_account_info(creds_json, scopes=scopes)
     gc = gspread.authorize(creds)
     
-    spreadsheet = gc.open("내관심종목")
+    spreadsheet = gc.open("관심종목")
     worksheet = spreadsheet.get_worksheet(0)
     all_data = worksheet.get_all_values()
     rows = all_data[1:]
