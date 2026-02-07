@@ -1,6 +1,6 @@
 import os
 import json
-import FinanceDataReader as fdr  # 안정적인 리스트 확보용
+import FinanceDataReader as fdr
 from pykrx import stock
 import pandas as pd
 from datetime import datetime, timedelta
@@ -18,7 +18,7 @@ def send_telegram_msg(token, chat_id, message):
         pass
 
 def run_analysis():
-    print("🚀 [클라우드 최적화 모드] 분석을 시작합니다...")
+    print("🚀 [테마 정렬 모드] 분석을 시작합니다...")
     
     try:
         # 1. 환경 변수 및 시트 연결
@@ -34,67 +34,69 @@ def run_analysis():
         rows = spreadsheet.get_worksheet(0).get_all_values()[1:]
         print(f"✅ 시트 연결 성공: {len(rows)}개 종목 로드")
 
-        # 2. 종목 리스트 확보 (FinanceDataReader 사용 - GitHub에서 훨씬 안정적)
-        print("🔍 시장 종목 리스트를 불러오는 중...")
-        try:
-            df_krx = fdr.StockListing('KRX')
-            # 종목명(Name)을 키로, 종목코드(Code)를 값으로 하는 딕셔너리 생성
-            ticker_map = pd.Series(df_krx.Code.values, index=df_krx.Name).to_dict()
-            print(f"✅ 시장 리스트 확보 성공 (총 {len(ticker_map)}개 종목)")
-        except Exception as e:
-            print(f"❌ 시장 리스트 확보 실패: {e}")
-            return
+        # 2. 시장 리스트 확보
+        df_krx = fdr.StockListing('KRX')
+        ticker_map = pd.Series(df_krx.Code.values, index=df_krx.Name).to_dict()
 
-        # 3. 날짜 설정 (최근 영업일 확인)
-        # 오늘이 주말인 경우를 대비해 최근 데이터를 가져올 수 있는 날짜 확인
+        # 3. 분석 루프
         now = datetime.now() + timedelta(hours=9)
         target_date = now.strftime("%Y%m%d")
-        
         matched_results = []
-        print(f"📊 분석 시작 (기준일: {target_date} 전후)")
 
-        # 4. 분석 루프
+        print(f"📊 분석 진행 중...")
         for i, row in enumerate(rows):
             name = row[0].strip()
             ticker = ticker_map.get(name)
             
             if ticker:
                 try:
-                    # pykrx를 사용하여 OHLCV 데이터 수집
-                    # 주말이면 pykrx가 알아서 최근 영업일 데이터를 가져옵니다.
                     df = stock.get_market_ohlcv_by_date("20240101", target_date, ticker)
-                    
                     if df is not None and len(df) >= 224:
                         ma120 = df['종가'].rolling(window=120).mean().iloc[-1]
                         ma224 = df['종가'].rolling(window=224).mean().iloc[-1]
                         current_close = df['종가'].iloc[-1]
                         
-                        # 샌드위치 조건 판별
                         if (ma224 < current_close < ma120) or (ma120 < current_close < ma224):
-                            theme = row[1] if len(row) > 1 else "미지정"
-                            matched_results.append([name, theme])
-                            print(f"✨ [포착] {name}")
+                            # 테마 정보가 있으면 가져오고 없으면 '미분류' 처리
+                            theme1 = row[1] if len(row) > 1 and row[1] else "미분류"
+                            matched_results.append({'종목명': name, '테마1': theme1})
                 except:
                     continue
             
-            # API 과부하 방지
-            if i % 20 == 0:
-                time.sleep(0.1)
+            if i % 20 == 0: time.sleep(0.05)
 
-        # 5. 결과 전송
-        final_date_str = now.strftime("%Y-%m-%d %H:%M")
+        # 4. 결과 정렬 및 메시지 생성
         if matched_results:
-            msg = f"<b>🔔 [분석 완료] {final_date_str}</b>\n총 {len(matched_results)}건 포착\n\n"
-            for res in matched_results:
-                msg += f"• <b>{res[0]}</b> | {res[1]}\n"
+            # 리스트를 데이터프레임으로 변환
+            res_df = pd.DataFrame(matched_results)
+            
+            # 테마1의 빈도수 계산 및 정렬
+            theme_counts = res_df['테마1'].value_counts()
+            res_df['빈도수'] = res_df['테마1'].map(theme_counts)
+            
+            # 정렬 순서: 1. 빈도수(내림차순) -> 2. 테마명(오름차순) -> 3. 종목명(오름차순)
+            res_df = res_df.sort_values(by=['빈도수', '테마1', '종목명'], ascending=[False, True, True])
+            
+            # 텔레그램 메시지 구성
+            final_date_str = now.strftime("%Y-%m-%d %H:%M")
+            msg = f"<b>🔔 [분석 완료] {final_date_str}</b>\n"
+            msg += f"포착된 종목: <b>{len(res_df)}건</b>\n"
+            msg += f"<i>(많이 포착된 테마 순 정렬)</i>\n\n"
+            
+            current_theme = ""
+            for _, r in res_df.iterrows():
+                # 테마가 바뀔 때마다 구분선이나 강조 추가 가능 (선택 사항)
+                msg += f"• <b>{r['종목명']}</b> | {r['테마1']}\n"
+            
             send_telegram_msg(bot_token, chat_id, msg)
-            print(f"✅ {len(matched_results)}건 전송 성공")
+            print(f"✅ {len(res_df)}건 정렬 전송 완료")
         else:
-            print("ℹ️ 조건 만족 종목 없음")
-            send_telegram_msg(bot_token, chat_id, f"✅ {final_date_str} 분석 완료: 포착된 종목 없음")
+            print("ℹ️ 포착 종목 없음")
+            # 필요 시 결과 없음 알림 주석 해제
+            # send_telegram_msg(bot_token, chat_id, f"✅ {target_date} 분석 완료: 포착된 종목 없음")
 
     except Exception as e:
-        print(f"❌ [에러] 전체 프로세스 오류: {e}")
+        print(f"❌ 에러 발생: {e}")
 
 if __name__ == "__main__":
     run_analysis()
