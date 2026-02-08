@@ -3,7 +3,7 @@ name: Daily Stock Scanner
 on:
   schedule:
     # 한국 시간(KST) 기준 오전 8시, 오후 12시, 3시, 5시 (UTC 보정)
-    - cron: '0 23,3,6,8 * * *'
+    - cron: '0 20,3,5,7 * * *'
   workflow_dispatch: 
 
 jobs:
