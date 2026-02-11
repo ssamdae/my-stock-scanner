@@ -11,7 +11,7 @@ import plotly.graph_objects as go
 from plotly.subplots import make_subplots  # 서브플롯 생성을 위한 라이브러리
 
 # 1. 페이지 설정
-st.set_page_config(page_title="주식 샌드위치 스캐너", layout="wide")
+st.set_page_config(page_title="120-224 스캐너", layout="wide")
 st.title("📈 120-224 샌드위치 분석기 + 거래량 차트")
 
 # 2. 텔레그램 전송 함수 (가격 정보 제외)
@@ -156,3 +156,4 @@ if btn_web or btn_tele:
 
     except Exception as e:
         st.error(f"오류 발생: {e}")
+
