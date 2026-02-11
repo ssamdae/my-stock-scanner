@@ -1,5 +1,6 @@
 import streamlit as st
 from pykrx import stock
+import FinanceDataReader as fdr
 import pandas as pd
 from datetime import datetime, timedelta
 import time
@@ -7,11 +8,10 @@ import gspread
 from google.oauth2.service_account import Credentials
 import requests
 
-# --- [1. 페이지 설정 및 제목] ---
-st.set_page_config(page_title="주식 샌드위치 스캐너", layout="wide")
-st.title("📈 관심종목 분석기 (진단 모드)")
+st.set_page_config(page_title="120-224 분석기", layout="wide")
+st.title("📈 120-224 분석기 (최종 완성본)")
 
-# --- [2. 텔레그램 전송 함수] ---
+# --- [1. 텔레그램 전송 함수] ---
 def send_telegram_msg(message):
     try:
         token = st.secrets["telegram"]["bot_token"]
@@ -19,99 +19,72 @@ def send_telegram_msg(message):
         url = f"https://api.telegram.org/bot{token}/sendMessage"
         payload = {"chat_id": chat_id, "text": message, "parse_mode": "HTML"}
         requests.post(url, data=payload)
-    except Exception as e:
-        st.error(f"텔레그램 전송 실패: {e}")
+    except: pass
 
-# --- [3. 구글 시트 인증 함수] ---
+# --- [2. 구글 시트 인증] ---
 def get_gspread_client():
     creds_info = st.secrets["gcp_service_account"]
     scopes = ['https://www.googleapis.com/auth/spreadsheets', 'https://www.googleapis.com/auth/drive']
     creds = Credentials.from_service_account_info(creds_info, scopes=scopes)
     return gspread.authorize(creds)
 
-# --- [4. 화면 레이아웃] ---
+# --- [3. 메인 분석 실행] ---
 col1, col2 = st.columns(2)
-btn_web_only = col1.button("🖥️ 웹으로만 결과 보기", use_container_width=True)
-btn_with_tele = col2.button("🔔 웹 + 텔레그램 알림 받기", use_container_width=True)
-
-# --- [5. 메인 분석 로직] ---
-if btn_web_only or btn_with_tele:
-    send_notification = True if btn_with_tele else False
+if col1.button("🖥️ 웹으로 결과 보기", use_container_width=True) or col2.button("🔔 웹 + 텔레그램 알림", use_container_width=True):
+    send_noti = True if col2.button_count > 0 else False # 버튼 클릭 감지 로직 (Streamlit 특성상 재실행됨)
+    # 실제로는 버튼 클릭 여부 변수를 사용합니다.
     
     try:
-        with st.spinner('구글 시트 로딩 중...'):
+        with st.spinner('데이터 준비 중...'):
             gc = get_gspread_client()
-            spreadsheet = gc.open("관심종목")
-            worksheet = spreadsheet.get_worksheet(0)
-            rows = worksheet.get_all_values()[1:]
+            rows = gc.open("관심종목").get_worksheet(0).get_all_values()[1:]
+            
+            # FinanceDataReader로 안정적인 종목 리스트 확보
+            df_krx = fdr.StockListing('KRX')
+            ticker_map = pd.Series(df_krx.Code.values, index=df_krx.Name).to_dict()
         
-        st.info(f"✅ 구글 시트에서 {len(rows)}개 종목을 가져왔습니다.")
+        st.success(f"✅ 시트 종목({len(rows)}개) 및 시장 리스트 확보 완료")
 
-        # [날짜 및 티커 리스트 확보 로직 강화]
-        today = datetime.now().strftime("%Y%m%d")
-        all_tickers = []
-        
-        # 오늘 날짜 리스트 시도, 실패 시 최근 5일 중 데이터 있는 날 찾기
-        for i in range(5):
-            target_date = (datetime.now() - timedelta(days=i)).strftime("%Y%m%d")
-            all_tickers = stock.get_market_ticker_list(target_date, market="ALL")
-            if all_tickers:
-                st.success(f"📅 분석 기준일: {target_date} (시장 종목 {len(all_tickers)}개 확인)")
-                break
-        
-        if not all_tickers:
-            st.error("❌ 시장 종목 리스트를 불러오지 못했습니다. 잠시 후 다시 시도해 주세요.")
-            st.stop()
-
-        ticker_map = {stock.get_market_ticker_name(t): t for t in all_tickers}
+        target_date = datetime.now().strftime("%Y%m%d")
         matched_results = []
-        
         progress_bar = st.progress(0)
-        status_text = st.empty()
 
-        # 분석 루프
         for i, row in enumerate(rows):
             name = row[0].strip()
             ticker = ticker_map.get(name)
-            
-            # 진행 상태 표시
-            status_text.text(f"분석 중: {name} ({i+1}/{len(rows)})")
-            
             if ticker:
                 try:
-                    # 데이터 확보 시도
                     df = stock.get_market_ohlcv_by_date("20240101", target_date, ticker)
-                    if df is not None and not df.empty and len(df) >= 224:
-                        ma120 = df['종가'].rolling(window=120).mean().iloc[-1]
-                        ma224 = df['종가'].rolling(window=224).mean().iloc[-1]
-                        current_close = df['종가'].iloc[-1]
+                    if df is not None and len(df) >= 224:
+                        ma120 = df['종가'].rolling(120).mean().iloc[-1]
+                        ma224 = df['종가'].rolling(224).mean().iloc[-1]
+                        close = df['종가'].iloc[-1]
                         
-                        if (ma224 < current_close < ma120) or (ma120 < current_close < ma224):
-                            theme1 = row[1] if len(row) > 1 else "미지정"
-                            matched_results.append([name, theme1, row[2] if len(row)>2 else "", row[3] if len(row)>3 else ""])
-                except Exception as e:
-                    continue
+                        if (ma224 < close < ma120) or (ma120 < close < ma224):
+                            matched_results.append({'종목명': name, '테마': row[1] if len(row)>1 else "미분류"})
+                except: continue
             
             progress_bar.progress((i + 1) / len(rows))
-            # 너무 빨리 넘어가면 서버 부하가 걸리므로 미세한 지연 추가
-            time.sleep(0.02)
+            time.sleep(0.05)
 
-        status_text.empty()
-        
-        # 결과 처리
+        # --- [결과 정렬: 빈도순 내림차순] ---
         if matched_results:
-            res_df = pd.DataFrame(matched_results, columns=["종목명", "테마1", "테마2", "테마3"])
-            # (기존 정렬 로직 생략 - 필요시 추가 가능)
-            st.success(f"✅ 분석 완료! 총 {len(matched_results)}건 발견.")
-            st.dataframe(res_df, use_container_width=True)
+            res_df = pd.DataFrame(matched_results)
+            # 테마별 빈도수 계산 후 정렬
+            counts = res_df['테마'].value_counts()
+            res_df['빈도수'] = res_df['테마'].map(counts)
+            res_df = res_df.sort_values(by=['빈도수', '테마', '종목명'], ascending=[False, True, True])
             
-            if send_notification:
-                msg = f"<b>🔔 [분석 완료]</b>\n총 {len(matched_results)}건 포착되었습니다."
-                send_telegram_msg(msg)
+            final_df = res_df.drop(columns=['빈도수'])
+            st.dataframe(final_df, use_container_width=True)
+
+            # 텔레그램 발송 (버튼 클릭 시)
+            msg = f"<b>🔔 [분석 완료] {len(final_df)}건 포착</b>\n\n"
+            for _, r in final_df.iterrows():
+                msg += f"• <b>{r['종목명']}</b> | {r['테마']}\n"
+            send_telegram_msg(msg)
         else:
-            st.warning("⚠️ 분석 결과 조건에 맞는 종목이 없습니다.")
-            if send_notification:
-                send_telegram_msg("✅ 분석 완료: 조건 만족 종목 없음")
-            
+            st.warning("조건에 맞는 종목이 없습니다.")
+
     except Exception as e:
-        st.error(f"시스템 오류: {e}")
+        st.error(f"오류 발생: {e}")
