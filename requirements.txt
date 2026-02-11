@@ -1,9 +1,5 @@
-streamlit
 pykrx
-pandas
-gspread
-google-auth
-tqdm
-requests
 finance-datareader
-
+streamlit
+gspread
+pandas
