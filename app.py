@@ -10,9 +10,9 @@ import requests
 
 # 1. 페이지 설정 및 제목
 st.set_page_config(page_title="120-224 스캐너", layout="wide")
-st.title("📈 120-224 샌드위치 분석기 (이중 백업 버전)")
+st.title("📈 120-224 샌드위치 분석기 (테마 확장 버전)")
 
-# 2. 텔레그램 전송 함수
+# 2. 텔레그램 전송 함수 (가격 정보 제외)
 def send_telegram_msg(message):
     try:
         token = st.secrets["telegram"]["bot_token"]
@@ -30,7 +30,7 @@ btn_tele = col2.button("🔔 웹 + 텔레그램 알림 받기", use_container_wi
 
 if btn_web or btn_tele:
     try:
-        with st.spinner('데이터 소스를 점검하며 종목 정보를 불러오는 중...'):
+        with st.spinner('데이터 소스를 점검하며 테마 정보를 불러오는 중...'):
             # [A] 구글 시트 데이터 로드
             creds = Credentials.from_service_account_info(
                 st.secrets["gcp_service_account"], 
@@ -83,26 +83,39 @@ if btn_web or btn_tele:
                         ma224 = df['종가'].rolling(224).mean().iloc[-1]
                         close = df['종가'].iloc[-1]
 
+                        # 샌드위치 조건
+                        # $$(MA_{224} < \text{현재가} < MA_{120}) \quad \text{또는} \quad (MA_{120} < \text{현재가} < MA_{224})$$
                         if (ma224 < close < ma120) or (ma120 < close < ma224):
                             matched.append({
                                 '종목명': name, 
-                                '테마1': row[1] if len(row) > 1 else "미분류",
-                                '현재가': int(close),
-                                '120일선': int(ma120),
-                                '224일선': int(ma224)
+                                '테마1': row[1] if len(row) > 1 else "",
+                                '테마2': row[2] if len(row) > 2 else "",
+                                '테마3': row[3] if len(row) > 3 else "",
+                                '현재가': int(close)
                             })
                     time.sleep(0.05)
                 except Exception as e:
                     error_logs.append(f"❌ {name} 분석 중 오류: {e}")
                     continue
 
-        # [D] 결과 출력 (오타 수정 완료)
+        # [D] 결과 출력 및 다중 정렬 로직
         if matched:
             res_df = pd.DataFrame(matched)
-            counts = res_df['테마1'].value_counts()
-            res_df['빈도수'] = res_df['테마1'].map(counts)
-            # '빈0수'를 '빈도수'로 올바르게 수정함
-            res_df = res_df.sort_values(by=['빈도수', '테마1', '종목명'], ascending=[False, True, True]).drop(columns=['빈도수'])
+            
+            # 각 테마별 빈도수 계산
+            f1 = res_df['테마1'].value_counts()
+            f2 = res_df['테마2'].value_counts()
+            f3 = res_df['테마3'].value_counts()
+            
+            res_df['빈도1'] = res_df['테마1'].map(f1).fillna(0)
+            res_df['빈도2'] = res_df['테마2'].map(f2).fillna(0)
+            res_df['빈도3'] = res_df['테마3'].map(f3).fillna(0)
+            
+            # 테마1 빈도 -> 테마2 빈도 -> 테마3 빈도 순으로 내림차순 정렬
+            res_df = res_df.sort_values(
+                by=['빈도1', '빈도2', '빈도3', '테마1', '종목명'], 
+                ascending=[False, False, False, True, True]
+            ).drop(columns=['빈도1', '빈도2', '빈도3'])
             
             st.success(f"✅ 총 {len(res_df)}건 발견 (기준일: {valid_date})")
             st.dataframe(res_df, use_container_width=True)
@@ -110,7 +123,11 @@ if btn_web or btn_tele:
             if btn_tele:
                 msg = f"<b>🔔 [샌드위치 포착: {valid_date}]</b>\n총 <b>{len(res_df)}건</b>\n\n"
                 for _, r in res_df.iterrows():
-                    msg += f"• <b>{r['종목명']}</b> | {r['테마1']} ({r['현재가']:,}원)\n"
+                    # 가격 정보를 제외하고 테마 1, 2, 3만 포함
+                    themes = f"{r['테마1']}"
+                    if r['테마2']: themes += f", {r['테마2']}"
+                    if r['테마3']: themes += f", {r['테마3']}"
+                    msg += f"• <b>{r['종목명']}</b> | {themes}\n"
                 send_telegram_msg(msg)
         else:
             st.warning(f"조건에 맞는 종목이 없습니다. (기준일: {valid_date})")
@@ -122,4 +139,3 @@ if btn_web or btn_tele:
 
     except Exception as e:
         st.error(f"시스템 전체 오류: {e}")
-
