@@ -8,8 +8,8 @@ from google.oauth2.service_account import Credentials
 import requests
 
 # --- [1. 페이지 설정 및 제목] ---
-st.set_page_config(page_title="주식 샌드위치 스캐너", layout="wide")
-st.title("📈 관심종목 분석기")
+st.set_page_config(page_title="120-224 스캐너", layout="wide")
+st.title("📈 120-224 분석기")
 
 # --- [2. 텔레그램 전송 함수] ---
 def send_telegram_msg(message):
@@ -120,3 +120,4 @@ if btn_web_only or btn_with_tele:
             
     except Exception as e:
         st.error(f"시스템 오류: {e}")
+
