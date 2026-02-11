@@ -1,5 +1,8 @@
+streamlit
+pandas
 pykrx
 finance-datareader
-streamlit
+plotly
 gspread
-pandas
+google-auth
+requests
