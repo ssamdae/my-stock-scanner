@@ -30,7 +30,6 @@ btn_tele = col2.button("🔔 웹 + 텔레그램 알림 받기", use_container_wi
 if btn_web or btn_tele:
     try:
         with st.spinner('데이터를 분석 중입니다...'):
-            # [A] 구글 시트 데이터 로드
             creds = Credentials.from_service_account_info(
                 st.secrets["gcp_service_account"], 
                 scopes=['https://www.googleapis.com/auth/spreadsheets', 'https://www.googleapis.com/auth/drive']
@@ -38,7 +37,6 @@ if btn_web or btn_tele:
             gc = gspread.authorize(creds)
             rows = gc.open("관심종목").get_worksheet(0).get_all_values()[1:]
 
-            # [B] 이중 백업 로직 (안정적인 티커 확보)
             ticker_map = {}
             valid_date = (datetime.now() - timedelta(days=1)).strftime("%Y%m%d")
             for i in range(7):
@@ -53,7 +51,6 @@ if btn_web or btn_tele:
                 df_krx = fdr.StockListing('KRX')
                 ticker_map = pd.Series(df_krx.Code.values, index=df_krx.Name).to_dict()
 
-        # [C] 분석 루프
         matched = []
         progress = st.progress(0)
         start_date = (datetime.now() - timedelta(days=450)).strftime("%Y%m%d")
@@ -71,41 +68,46 @@ if btn_web or btn_tele:
                         ma224 = df['종가'].rolling(224).mean().iloc[-1]
                         close = df['종가'].iloc[-1]
 
-                        # 샌드위치 조건: 120일선과 224일선 사이에 종가가 위치
                         if (ma224 < close < ma120) or (ma120 < close < ma224):
                             matched.append({
                                 '종목명': name, 
                                 '티커': ticker,
-                                '테마1': row[1] if len(row) > 1 else "",
-                                '테마2': row[2] if len(row) > 2 else "",
-                                '테마3': row[3] if len(row) > 3 else ""
+                                '테마1': row[1].strip() if len(row) > 1 else "",
+                                '테마2': row[2].strip() if len(row) > 2 else "",
+                                '테마3': row[3].strip() if len(row) > 3 else ""
                             })
                     time.sleep(0.05)
                 except: continue
 
-        # [D] 결과 출력 및 정렬
+        # [D] 결과 출력 및 정렬 (수정된 로직)
         if matched:
             res_df = pd.DataFrame(matched)
             
-            # 테마 빈도 계산
-            f1, f2, f3 = res_df['테마1'].value_counts(), res_df['테마2'].value_counts(), res_df['테마3'].value_counts()
+            # 1. 실제 값이 있는 테마들만 빈도 계산 (빈 문자열 제외)
+            f1 = res_df[res_df['테마1'] != '']['테마1'].value_counts()
+            f2 = res_df[res_df['테마2'] != '']['테마2'].value_counts()
+            f3 = res_df[res_df['테마3'] != '']['테마3'].value_counts()
+            
+            # 2. 빈도 컬럼 생성 (빈 문자열은 빈도를 0으로 처리)
             res_df['빈도1'] = res_df['테마1'].map(f1).fillna(0)
             res_df['빈도2'] = res_df['테마2'].map(f2).fillna(0)
             res_df['빈도3'] = res_df['테마3'].map(f3).fillna(0)
             
-            # 정렬 기준: 테마 빈도가 높은 순 -> 테마명 -> 종목명
+            # 3. 계층적 정렬
+            # - 빈도1 내림차순 -> 테마1 이름으로 그룹화
+            # - 그 안에서 빈도2 내림차순 -> 테마2 이름으로 그룹화
+            # - 그 안에서 빈도3 내림차순
             res_df = res_df.sort_values(
-                by=['빈도1', '빈도2', '빈도3', '테마1', '종목명'], 
-                ascending=[False, False, False, True, True]
+                by=['빈도1', '테마1', '빈도2', '테마2', '빈도3', '종목명'], 
+                ascending=[False, True, False, True, False, True]
             )
             
             st.success(f"✅ 총 {len(res_df)}건 발견 (기준일: {valid_date})")
             
-            # 분석에 사용된 보조 컬럼 제외 후 출력
+            # 보조 컬럼 제외 후 출력
             display_df = res_df.drop(columns=['티커', '빈도1', '빈도2', '빈도3'])
             st.dataframe(display_df, use_container_width=True)
 
-            # [E] 텔레그램 전송 (버튼 클릭 시)
             if btn_tele:
                 msg = f"<b>🔔 [샌드위치 포착: {valid_date}]</b>\n총 <b>{len(res_df)}건</b>\n\n"
                 for _, r in res_df.iterrows():
