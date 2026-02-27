@@ -157,3 +157,4 @@ if btn_web or btn_tele:
     except Exception as e:
         st.error(f"오류 발생: {e}")
 
+
