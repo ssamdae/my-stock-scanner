@@ -21,8 +21,7 @@ def send_telegram_msg(message):
         payload = {"chat_id": chat_id, "text": message, "parse_mode": "HTML"}
         response = requests.post(url, data=payload, timeout=5)
         return response.status_code == 200
-    except Exception as e:
-        st.error(f"텔레그램 전송 실패: {e}")
+    except Exception:
         return False
 
 # 3. 분석 실행 버튼
@@ -32,58 +31,53 @@ btn_tele = col2.button("🔔 웹 + 텔레그램 알림 받기", use_container_wi
 
 if btn_web or btn_tele:
     try:
-        with st.spinner('데이터를 분석 중입니다...'):
-            # [A] 구글 시트 연결 및 데이터 로드
-            try:
-                creds = Credentials.from_service_account_info(
-                    st.secrets["gcp_service_account"], 
-                    scopes=['https://www.googleapis.com/auth/spreadsheets', 'https://www.googleapis.com/auth/drive']
-                )
-                gc = gspread.authorize(creds)
-                sheet_data = gc.open("관심종목").get_worksheet(0).get_all_values()
-                
-                if len(sheet_data) <= 1:
-                    st.warning("구글 시트에 분석할 종목 데이터가 없습니다.")
-                    st.stop()
-                rows = sheet_data[1:]
-            except Exception as ge:
-                st.error(f"구글 시트 로드 실패: {ge}")
+        with st.spinner('데이터 소스를 연결 중입니다...'):
+            # [A] 구글 시트 연결
+            creds = Credentials.from_service_account_info(
+                st.secrets["gcp_service_account"], 
+                scopes=['https://www.googleapis.com/auth/spreadsheets', 'https://www.googleapis.com/auth/drive']
+            )
+            gc = gspread.authorize(creds)
+            sheet_data = gc.open("관심종목").get_worksheet(0).get_all_values()
+            
+            if len(sheet_data) <= 1:
+                st.warning("분석할 종목 데이터가 없습니다.")
                 st.stop()
+            rows = sheet_data[1:]
 
-            # [B] 티커 맵 구성 (재시도 및 백업 로직 포함)
+            # [B] 티커 맵 구성 (차단 회피 및 다중 백업)
             ticker_map = {}
-            valid_date = datetime.now().strftime("%Y%m%d")
+            valid_date = ""
             found_market_day = False
 
-            # 1단계: pykrx로 최근 영업일 찾기 (최대 3회 재시도)
-            for attempt in range(3):
+            # 시도 1: pykrx (가장 정확하지만 차단에 취약)
+            try:
                 for i in range(10):
                     d = (datetime.now() - timedelta(days=i)).strftime("%Y%m%d")
-                    try:
-                        temp = stock.get_market_ticker_list(date=d, market="ALL")
-                        if temp and len(temp) > 500: # 유의미한 수량의 종목이 있을 때만 인정
-                            ticker_map = {stock.get_market_ticker_name(t): t for t in temp}
-                            valid_date = d
-                            found_market_day = True
-                            break
-                    except:
-                        continue
-                if found_market_day: break
-                time.sleep(1.5) # 실패 시 잠시 대기 후 재시도
+                    temp = stock.get_market_ticker_list(date=d, market="ALL")
+                    if temp and len(temp) > 500:
+                        ticker_map = {stock.get_market_ticker_name(t): t for t in temp}
+                        valid_date = d
+                        found_market_day = True
+                        break
+                time.sleep(0.5) 
+            except: pass
 
-            # 2단계: pykrx 실패 시 FinanceDataReader로 대체
-            if not found_market_day or not ticker_map:
-                st.info("Pykrx 데이터를 가져오지 못해 백업 서버(FDR)를 연결합니다...")
+            # 시도 2: FinanceDataReader (pykrx 실패 시)
+            if not found_market_day:
                 try:
                     df_krx = fdr.StockListing('KRX')
-                    # 종목명을 Key로, 종목코드를 Value로 맵핑
-                    ticker_map = pd.Series(df_krx.Code.values, index=df_krx.Name).to_dict()
-                    # 날짜는 안전하게 전일로 설정
-                    valid_date = (datetime.now() - timedelta(days=1)).strftime("%Y%m%d")
-                    found_market_day = True
-                except Exception as fe:
-                    st.error(f"모든 데이터 소스 연결 실패: {fe}")
-                    st.stop()
+                    if df_krx is not None and not df_krx.empty:
+                        ticker_map = pd.Series(df_krx.Code.values, index=df_krx.Name).to_dict()
+                        valid_date = (datetime.now() - timedelta(days=1)).strftime("%Y%m%d")
+                        found_market_day = True
+                        st.info("💡 보조 데이터 서버(FDR)를 통해 종목을 불러왔습니다.")
+                except: pass
+
+            if not found_market_day:
+                st.error("⚠️ 데이터 서버(KRX/Naver)로부터 응답이 없습니다. (휴장일 혹은 IP 차단)")
+                st.info("잠시 후 다시 시도하거나, 로컬 환경에서 실행해 보세요.")
+                st.stop()
 
         # [C] 종목 분석 루프
         matched = []
@@ -99,7 +93,7 @@ if btn_web or btn_tele:
             
             if ticker:
                 try:
-                    # 데이터 로드 (Expecting value 오류 방지를 위해 결과 존재 여부 체크)
+                    # 데이터 로드 시 빈 값 여부를 엄격히 체크
                     df = stock.get_market_ohlcv_by_date(start_date, valid_date, ticker)
                     
                     if df is not None and not df.empty and len(df) >= 224:
@@ -107,7 +101,6 @@ if btn_web or btn_tele:
                         ma224 = df['종가'].rolling(224).mean().iloc[-1]
                         close = df['종가'].iloc[-1]
 
-                        # 샌드위치 조건 체크
                         if (ma224 < close < ma120) or (ma120 < close < ma224):
                             matched.append({
                                 '종목명': name, 
@@ -116,15 +109,15 @@ if btn_web or btn_tele:
                                 '테마2': row[2].strip() if len(row) > 2 else "",
                                 '테마3': row[3].strip() if len(row) > 3 else ""
                             })
-                    time.sleep(0.05) # 서버 부하 방지용 짧은 대기
-                except:
+                    # 차단 방지를 위해 요청 간격을 조금 늘림 (0.05 -> 0.2)
+                    time.sleep(0.2) 
+                except Exception:
                     continue 
 
         # [D] 결과 출력 및 정렬
         if matched:
             res_df = pd.DataFrame(matched)
             
-            # 빈도 계산 (실제 값이 있는 경우만)
             f1 = res_df[res_df['테마1'] != '']['테마1'].value_counts()
             f2 = res_df[res_df['테마2'] != '']['테마2'].value_counts()
             f3 = res_df[res_df['테마3'] != '']['테마3'].value_counts()
@@ -133,14 +126,12 @@ if btn_web or btn_tele:
             res_df['빈도2'] = res_df['테마2'].map(f2).fillna(0)
             res_df['빈도3'] = res_df['테마3'].map(f3).fillna(0)
             
-            # 정렬 순서: 빈도1(내림) -> 테마1명 -> 빈도2(내림) -> 테마2명 -> 종목명
             res_df = res_df.sort_values(
                 by=['빈도1', '테마1', '빈도2', '테마2', '빈도3', '종목명'], 
                 ascending=[False, True, False, True, False, True]
             )
             
             st.success(f"✅ 총 {len(res_df)}건 발견 (기준일: {valid_date})")
-            
             display_df = res_df.drop(columns=['티커', '빈도1', '빈도2', '빈도3'])
             st.dataframe(display_df, use_container_width=True)
 
@@ -160,8 +151,11 @@ if btn_web or btn_tele:
             st.warning(f"조건에 맞는 종목이 없습니다. (기준일: {valid_date})")
 
     except Exception as e:
-        # 전체 실행 과정 중 에러 발생 시 출력 및 텔레그램 알림 시도
-        error_full_msg = f"❌ 스캐너 실행 중 오류 발생: {e}"
-        st.error(error_full_msg)
+        error_msg = str(e)
+        st.error(f"오류 발생: {error_msg}")
+        # 오류가 'Expecting value'인 경우 사용자에게 상황 설명 추가
+        if "Expecting value" in error_msg:
+            st.info("💡 현재 데이터 서버에서 올바른 값을 보내주지 않고 있습니다. 주로 휴장일이거나 서버 IP가 일시 차단되었을 때 발생합니다.")
+        
         if btn_tele:
-            send_telegram_msg(f"⚠️ [스캐너 에러 발생]\n{str(e)[:150]}")
+            send_telegram_msg(f"⚠️ [스캐너 에러]\n{error_msg[:100]}")
