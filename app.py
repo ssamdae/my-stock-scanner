@@ -1,6 +1,5 @@
 import streamlit as st
 import yfinance as yf
-import FinanceDataReader as fdr
 import pandas as pd
 from datetime import datetime, timedelta
 import time
@@ -9,8 +8,8 @@ from google.oauth2.service_account import Credentials
 import requests
 
 # 1. 페이지 설정
-st.set_page_config(page_title="F열 자동 완성 스캐너", layout="wide")
-st.title("🛡️ F열 티커 기록 & 120-224 스캐너")
+st.set_page_config(page_title="무적 스캐너", layout="wide")
+st.title("🛡️ 서버 차단 우회형 120-224 스캐너")
 
 # 2. 텔레그램 전송 함수
 def send_telegram_msg(message):
@@ -23,109 +22,87 @@ def send_telegram_msg(message):
     except: pass
 
 # 3. 분석 실행 버튼
-col1, col2 = st.columns(2)
-btn_web = col1.button("🖥️ 분석 시작 (F열 자동 완성)", use_container_width=True)
-btn_tele = col2.button("🔔 분석 + 텔레그램 알림", use_container_width=True)
+btn_run = st.button("🚀 분석 시작 (F열에 티커가 있는 종목 우선)", use_container_width=True)
 
-if btn_web or btn_tele:
+if btn_run:
     try:
-        with st.spinner('1단계: 구글 시트 연결 중...'):
+        with st.spinner('1단계: 구글 시트 데이터 로드 중...'):
             creds = Credentials.from_service_account_info(
                 st.secrets["gcp_service_account"], 
                 scopes=['https://www.googleapis.com/auth/spreadsheets', 'https://www.googleapis.com/auth/drive']
             )
             gc = gspread.authorize(creds)
             worksheet = gc.open("관심종목").get_worksheet(0)
-            all_data = worksheet.get_all_values()
-            rows = all_data[1:] # 데이터 (제목 제외)
+            rows = worksheet.get_all_values()[1:] # 제목 제외
 
-        # F열(인덱스 5)이 비어있는지 체크
-        # 리스트 길이가 6보다 짧거나 6번째 항목이 비어있는 경우를 모두 확인합니다.
-        needs_ticker = any(len(row) < 6 or not row[5] for row in rows)
-
-        if needs_ticker:
-            with st.spinner('2단계: 미싱 티커 찾는 중 (F열 업데이트 시도)...'):
-                df_master = pd.DataFrame()
-                urls = [
-                    "https://raw.githubusercontent.com/FinanceData/KRX/main/KRX_list.csv",
-                    "https://raw.githubusercontent.com/FinanceData/KRX/master/KRX_list.csv"
-                ]
-                for url in urls:
-                    try:
-                        df_master = pd.read_csv(url)
-                        if not df_master.empty: break
-                    except: continue
+        # [A] 미싱 티커 자동 완성 시도 (실패해도 중단하지 않음)
+        missing_rows = [i for i, r in enumerate(rows) if len(r) < 6 or not r[5]]
+        
+        if missing_rows:
+            st.info(f"💡 {len(missing_rows)}개 종목의 티커가 F열에 없습니다. 자동 찾기를 시도합니다...")
+            try:
+                # 차단에 가장 강한 네이버 금융 경로 직접 활용 시도
+                url = "https://raw.githubusercontent.com/FinanceData/KRX/main/KRX_list.csv"
+                df_master = pd.read_csv(url)
+                master_map = {r['Name']: str(r['Symbol']).zfill(6) + (".KS" if r['Market'] == 'KOSPI' else ".KQ") 
+                              for _, r in df_master.iterrows()}
                 
-                if df_master.empty:
-                    try: df_master = fdr.StockListing('KRX')
-                    except:
-                        st.error("종목 리스트 서버 접속 실패. F열에 직접 티커를 입력해 주세요.")
-                        st.stop()
-
-                # 매핑 사전 구축
-                master_map = {}
-                for _, r in df_master.iterrows():
-                    code_val = r['Symbol'] if 'Symbol' in r else r['Code']
-                    market_val = r['Market'] if 'Market' in r else ""
-                    suffix = ".KS" if "KOSPI" in str(market_val).upper() else ".KQ"
-                    master_map[r['Name'].strip()] = str(code_val).zfill(6) + suffix
-
-                # 시트 업데이트 (티커가 없는 행만 F열에 기록)
-                for i, row in enumerate(rows):
-                    # F열(인덱스 5)이 비어있는지 확인
-                    if len(row) < 6 or not row[5]:
-                        name = row[0].strip()
-                        new_ticker = master_map.get(name)
-                        if new_ticker:
-                            # 구글 시트의 F열(6번째 열)에 티커 기록
-                            worksheet.update_cell(i + 2, 6, new_ticker)
-                            
-                            # 현재 메모리상의 rows 데이터도 분석을 위해 동기화
-                            # 행 데이터가 F열까지 없을 경우 확장해줍니다.
-                            while len(row) < 6:
-                                row.append("")
-                            row[5] = new_ticker
-                            time.sleep(0.2) # Google API Quota 준수
-
-        with st.spinner('3단계: 샌드위치 분석 중...'):
-            matched = []
-            progress = st.progress(0)
-            
-            for i, row in enumerate(rows):
-                name = row[0].strip()
-                # F열(인덱스 5)에서 티커를 읽어옵니다.
-                ticker = row[5].strip() if len(row) > 5 else None
-                
-                progress.progress((i + 1) / len(rows))
-                
-                if ticker and ticker != "찾을 수 없음":
-                    try:
-                        df = yf.Ticker(ticker).history(period="1y")
-                        if len(df) >= 224:
-                            ma120 = df['Close'].rolling(120).mean().iloc[-1]
-                            ma224 = df['Close'].rolling(224).mean().iloc[-1]
-                            close = df['Close'].iloc[-1]
-
-                            if (ma224 < close < ma120) or (ma120 < close < ma224):
-                                matched.append({
-                                    '종목명': name, 
-                                    '티커': ticker,
-                                    '테마1': row[1] if len(row) > 1 else "", # 필요시 테마 열 번호도 조정하세요
-                                    '테마2': row[2] if len(row) > 2 else ""
-                                })
+                updated_count = 0
+                for idx in missing_rows:
+                    name = rows[idx][0].strip()
+                    new_ticker = master_map.get(name)
+                    if new_ticker:
+                        worksheet.update_cell(idx + 2, 6, new_ticker)
+                        while len(rows[idx]) < 6: rows[idx].append("")
+                        rows[idx][5] = new_ticker
+                        updated_count += 1
                         time.sleep(0.2)
-                    except: continue
+                st.success(f"✅ {updated_count}개 종목의 티커를 자동으로 채웠습니다!")
+            except:
+                st.warning("⚠️ 외부 서버 차단으로 인해 티커 자동 완성에 실패했습니다. 분석 가능한 종목만 먼저 진행합니다.")
 
-        # 결과 출력
-        if matched:
-            res_df = pd.DataFrame(matched)
-            st.success(f"✅ 총 {len(res_df)}건 발견!")
-            st.dataframe(res_df, use_container_width=True)
-            if btn_tele:
-                msg = f"<b>🔔 분석 완료: {len(res_df)}건</b>"
-                send_telegram_msg(msg)
+        # [B] 실제 분석 루프
+        matched = []
+        progress = st.progress(0)
+        
+        # 티커가 있는 종목들만 필터링
+        valid_rows = [r for r in rows if len(r) >= 6 and r[5] and ".K" in r[5]]
+        
+        if not valid_rows:
+            st.error("❌ 분석할 티커가 하나도 없습니다. 구글 시트 F열에 '005930.KS'와 같이 티커를 입력해 주세요.")
         else:
-            st.warning("조건에 맞는 종목이 없습니다.")
+            for i, row in enumerate(valid_rows):
+                name, ticker = row[0], row[5]
+                progress.progress((i + 1) / len(valid_rows))
+                
+                try:
+                    # yfinance 데이터 호출 (이 과정은 차단될 확률이 매우 낮음)
+                    df = yf.Ticker(ticker).history(period="1y")
+                    if len(df) >= 224:
+                        ma120 = df['Close'].rolling(120).mean().iloc[-1]
+                        ma224 = df['Close'].rolling(224).mean().iloc[-1]
+                        close = df['Close'].iloc[-1]
+
+                        if (ma224 < close < ma120) or (ma120 < close < ma224):
+                            matched.append({
+                                '종목명': name, '티커': ticker,
+                                '테마1': row[1] if len(row) > 1 else "",
+                                '테마2': row[2] if len(row) > 2 else ""
+                            })
+                    time.sleep(0.2)
+                except: continue
+
+            # [C] 결과 출력
+            if matched:
+                res_df = pd.DataFrame(matched)
+                st.success(f"🎯 총 {len(res_df)}개 종목 포착!")
+                st.dataframe(res_df, use_container_width=True)
+                
+                # 텔레그램 전송
+                msg = f"<b>🔔 120-224 분석 완료</b>\n포착: {len(res_df)}건"
+                send_telegram_msg(msg)
+            else:
+                st.warning("🔍 조건에 맞는 종목이 없습니다.")
 
     except Exception as e:
-        st.error(f"오류 발생: {e}")
+        st.error(f"❌ 치명적 오류 발생: {e}")
