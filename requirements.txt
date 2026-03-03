@@ -1,8 +1,7 @@
 streamlit
 yfinance
-FinanceDataReader
+finance-datareader
 pandas
 gspread
 google-auth
 requests
-
