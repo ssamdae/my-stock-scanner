@@ -71,39 +71,31 @@ if btn_web or btn_tele:
             status_text.text(f"분석 중: {name} ({ticker})")
             
             try:
-                # 1차 시도: pykrx로 데이터 수집
+                # 1차 시도: pykrx
                 df = stock.get_market_ohlcv_by_date(start_date, end_date, ticker)
                 
-                # 2차 시도 (백업): pykrx 실패 시 yfinance 사용
+                # 2차 시도 (백업): yfinance
                 if df is None or df.empty or len(df) < 224:
-                    # 한국 종목 코드 변환 (코스피 .KS / 코스닥 .KQ)
-                    # 보통 0으로 시작하거나 숫자가 작으면 코스피, 아니면 코스닥 확률이 높지만 
-                    # 정확히는 fdr 등으로 구분해야 하나 여기선 간단히 시도
                     yf_ticker = f"{ticker}.KS" if int(ticker[0]) < 5 else f"{ticker}.KQ"
                     df_yf = yf.download(yf_ticker, start=(datetime.now() - timedelta(days=450)), end=datetime.now(), progress=False)
                     if not df_yf.empty:
                         df = df_yf.rename(columns={'Close': '종가'})
 
                 if df is not None and not df.empty and len(df) >= 224:
-                    # 이동평균선 계산
                     ma120 = df['종가'].rolling(120).mean().iloc[-1]
                     ma224 = df['종가'].rolling(224).mean().iloc[-1]
                     close = df['종가'].iloc[-1]
 
-                    # 샌드위치 조건 판별 (주가가 120선과 224선 사이에 위치)
+                    # 샌드위치 조건 판별
                     if (ma224 < close < ma120) or (ma120 < close < ma224):
                         matched.append({
                             '종목명': name, 
                             '티커': ticker,
-                            '현재가': int(close),
-                            '120일선': int(ma120),
-                            '224일선': int(ma224),
                             '테마1': row[2].strip() if len(row) > 2 else "",
                             '테마2': row[3].strip() if len(row) > 3 else "",
                             '테마3': row[4].strip() if len(row) > 4 else ""
                         })
                 
-                # 차단 방지를 위한 미세한 지연
                 time.sleep(0.1)
                 
             except Exception:
@@ -115,13 +107,14 @@ if btn_web or btn_tele:
         if matched:
             res_df = pd.DataFrame(matched)
             
-            # 빈도 분석 및 정렬 로직
+            # 테마 빈도 계산 (정렬용)
             f1 = res_df[res_df['테마1'] != '']['테마1'].value_counts()
             f2 = res_df[res_df['테마2'] != '']['테마2'].value_counts()
             
             res_df['빈도1'] = res_df['테마1'].map(f1).fillna(0)
             res_df['빈도2'] = res_df['테마2'].map(f2).fillna(0)
             
+            # 빈도순 정렬
             res_df = res_df.sort_values(
                 by=['빈도1', '테마1', '빈도2', '종목명'], 
                 ascending=[False, True, False, True]
@@ -129,9 +122,12 @@ if btn_web or btn_tele:
             
             st.success(f"✅ 총 {len(res_df)}개의 종목이 샌드위치 구간에 있습니다.")
             
-            # 화면 표시용 가공
-            display_df = res_df.drop(columns=['티커', '빈도1', '빈도2'])
-            st.dataframe(display_df, use_container_width=True)
+            # [수정 포인트] 표시할 열 선택 및 인덱스 제거
+            # 보여줄 열만 필터링: 종목명, 테마1, 테마2, 테마3
+            display_df = res_df[['종목명', '테마1', '테마2', '테마3']]
+            
+            # hide_index=True 를 사용하여 첫 번째 숫자 열 삭제
+            st.dataframe(display_df, use_container_width=True, hide_index=True)
 
             # [E] 텔레그램 전송
             if btn_tele:
@@ -150,5 +146,3 @@ if btn_web or btn_tele:
 
     except Exception as e:
         st.error(f"❌ 오류 발생: {str(e)}")
-        if btn_tele:
-            send_telegram_msg(f"⚠️ [스캐너 에러]\n{str(e)[:100]}")
