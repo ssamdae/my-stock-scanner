@@ -1,6 +1,5 @@
 import streamlit as st
 from pykrx import stock
-import FinanceDataReader as fdr
 import pandas as pd
 from datetime import datetime, timedelta
 import time
@@ -28,121 +27,106 @@ def send_telegram_msg(message):
 
 # 3. 분석 실행 버튼
 col1, col2 = st.columns(2)
-btn_web = col1.button("🖥️ 웹으로 결과 보기", use_container_width=True)
-btn_tele = col2.button("🔔 웹 + 텔레그램 알림 받기", use_container_width=True)
+# 최신 문법 적용: use_container_width -> width='stretch'
+btn_web = col1.button("🖥️ 웹으로 결과 보기", width='stretch')
+btn_tele = col2.button("🔔 웹 + 텔레그램 알림 받기", width='stretch')
 
 if btn_web or btn_tele:
     try:
         with st.spinner('구글 시트에서 데이터를 불러오는 중...'):
-            # [A] 구글 시트 연결
             creds = Credentials.from_service_account_info(
                 st.secrets["gcp_service_account"], 
                 scopes=['https://www.googleapis.com/auth/spreadsheets', 'https://www.googleapis.com/auth/drive']
             )
             gc = gspread.authorize(creds)
-            
-            # 시트 열기 (A: 티커, B: 종목명, C~E: 테마)
             sheet = gc.open("관심종목").get_worksheet(0)
             sheet_data = sheet.get_all_values()
             
             if len(sheet_data) <= 1:
-                st.warning("분석할 종목 데이터가 없습니다. 시트를 확인해주세요.")
+                st.warning("분석할 종목 데이터가 없습니다.")
                 st.stop()
-            
-            rows = sheet_data[1:]  # 헤더 제외
+            rows = sheet_data[1:]
 
-        # [B] 분석 설정
         matched = []
         progress_bar = st.progress(0)
         status_text = st.empty()
         
-        # 날짜 설정
         end_date = datetime.now().strftime("%Y%m%d")
         start_date = (datetime.now() - timedelta(days=450)).strftime("%Y%m%d")
 
-        # [C] 종목 분석 루프
         for i, row in enumerate(rows):
             if not row or not row[0]: continue
             
-            ticker = row[0].strip() # A열: 티커
-            name = row[1].strip()   # B열: 종목명
+            ticker = row[0].strip()
+            name = row[1].strip()
             
             progress_bar.progress((i + 1) / len(rows))
             status_text.text(f"분석 중: {name} ({ticker})")
             
+            df = None
             try:
-                # 1차 시도: pykrx
+                # 1. pykrx 시도
                 df = stock.get_market_ohlcv_by_date(start_date, end_date, ticker)
                 
-                # 2차 시도 (백업): yfinance
+                # 2. pykrx 실패 시 yfinance 백업 (시장 자동 판별 로직 개선)
                 if df is None or df.empty or len(df) < 224:
-                    yf_ticker = f"{ticker}.KS" if int(ticker[0]) < 5 else f"{ticker}.KQ"
-                    df_yf = yf.download(yf_ticker, start=(datetime.now() - timedelta(days=450)), end=datetime.now(), progress=False)
-                    if not df_yf.empty:
-                        df = df_yf.rename(columns={'Close': '종가'})
+                    # 코스피/코스닥 둘 다 시도하여 데이터가 있는 쪽을 선택
+                    for suffix in [".KS", ".KQ"]:
+                        df_yf = yf.download(ticker + suffix, start=(datetime.now() - timedelta(days=450)), end=datetime.now(), progress=False, show_errors=False)
+                        if not df_yf.empty and len(df_yf) >= 224:
+                            df = df_yf.rename(columns={'Close': '종가'})
+                            break
 
                 if df is not None and not df.empty and len(df) >= 224:
-                    ma120 = df['종가'].rolling(120).mean().iloc[-1]
-                    ma224 = df['종가'].rolling(224).mean().iloc[-1]
-                    close = df['종가'].iloc[-1]
+                    # 종가 컬럼이 MultiIndex인 경우 처리 (yfinance 최신 버전 대응)
+                    if isinstance(df['종가'], pd.DataFrame):
+                        close_series = df['종가'].iloc[:, 0]
+                    else:
+                        close_series = df['종가']
 
-                    # 샌드위치 조건 판별
-                    if (ma224 < close < ma120) or (ma120 < close < ma224):
+                    ma120 = close_series.rolling(120).mean().iloc[-1]
+                    ma224 = close_series.rolling(224).mean().iloc[-1]
+                    last_close = close_series.iloc[-1]
+
+                    if (ma224 < last_close < ma120) or (ma120 < last_close < ma224):
                         matched.append({
                             '종목명': name, 
-                            '티커': ticker,
                             '테마1': row[2].strip() if len(row) > 2 else "",
                             '테마2': row[3].strip() if len(row) > 3 else "",
-                            '테마3': row[4].strip() if len(row) > 4 else ""
+                            '테마3': row[4].strip() if len(row) > 4 else "",
+                            'sort_key': row[2].strip() if len(row) > 2 else "" # 정렬용
                         })
                 
-                time.sleep(0.1)
+                # [중요] Rate Limit 방지를 위해 대기 시간 조절 (0.1 -> 0.5)
+                # 종목 수가 많다면 1.0까지 늘리는 것을 권장합니다.
+                time.sleep(1.0)
                 
-            except Exception:
+            except Exception as e:
                 continue
 
         status_text.empty()
 
-        # [D] 결과 분석 및 출력
         if matched:
             res_df = pd.DataFrame(matched)
             
-            # 테마 빈도 계산 (정렬용)
+            # 테마 빈도 계산 및 정렬
             f1 = res_df[res_df['테마1'] != '']['테마1'].value_counts()
-            f2 = res_df[res_df['테마2'] != '']['테마2'].value_counts()
+            res_df['빈도'] = res_df['테마1'].map(f1).fillna(0)
+            res_df = res_df.sort_values(by=['빈도', '테마1', '종목명'], ascending=[False, True, True])
             
-            res_df['빈도1'] = res_df['테마1'].map(f1).fillna(0)
-            res_df['빈도2'] = res_df['테마2'].map(f2).fillna(0)
+            st.success(f"✅ 총 {len(res_df)}개의 종목 발견")
             
-            # 빈도순 정렬
-            res_df = res_df.sort_values(
-                by=['빈도1', '테마1', '빈도2', '종목명'], 
-                ascending=[False, True, False, True]
-            )
-            
-            st.success(f"✅ 총 {len(res_df)}개의 종목이 샌드위치 구간에 있습니다.")
-            
-            # [수정 포인트] 표시할 열 선택 및 인덱스 제거
-            # 보여줄 열만 필터링: 종목명, 테마1, 테마2, 테마3
+            # 요청사항: 종목명, 테마1, 테마2, 테마3만 표시 + 인덱스 삭제
             display_df = res_df[['종목명', '테마1', '테마2', '테마3']]
-            
-            # hide_index=True 를 사용하여 첫 번째 숫자 열 삭제
-            st.dataframe(display_df, use_container_width=True, hide_index=True)
+            st.dataframe(display_df, width='stretch', hide_index=True)
 
-            # [E] 텔레그램 전송
             if btn_tele:
-                msg = f"<b>🔔 [샌드위치 포착: {end_date}]</b>\n총 <b>{len(res_df)}건</b> 발견\n\n"
+                msg = f"<b>🔔 [샌드위치 포착: {end_date}]</b>\n총 <b>{len(res_df)}건</b>\n\n"
                 for _, r in res_df.iterrows():
-                    themes = f"#{r['테마1']}"
-                    if r['테마2']: themes += f" #{r['테마2']}"
-                    msg += f"• <b>{r['종목명']}</b> | {themes}\n"
-                
-                if send_telegram_msg(msg):
-                    st.toast("텔레그램 메시지 전송 완료!")
-                else:
-                    st.error("텔레그램 전송 실패")
+                    msg += f"• <b>{r['종목명']}</b> | {r['테마1']}\n"
+                send_telegram_msg(msg)
         else:
-            st.warning(f"조건에 맞는 종목이 없습니다. (기준일: {end_date})")
+            st.warning("조건에 맞는 종목이 없습니다.")
 
     except Exception as e:
-        st.error(f"❌ 오류 발생: {str(e)}")
+        st.error(f"❌ 시스템 오류: {str(e)}")
