@@ -1,8 +1,8 @@
 streamlit
-pandas
 pykrx
-finance-datareader
-plotly
+FinanceDataReader
+pandas
 gspread
 google-auth
 requests
+yfinance
