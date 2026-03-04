@@ -8,7 +8,7 @@ from google.oauth2.service_account import Credentials
 import requests
 import yfinance as yf
 
-# 1. 페이지 설정
+# 1. 페이지 설정 (2026년 기준 최신 문법 반영)
 st.set_page_config(page_title="120-224 스캐너 PRO", layout="wide")
 st.title("📈 120-224 샌드위치 분석기")
 st.markdown("---")
@@ -67,7 +67,7 @@ if btn_web or btn_tele:
                 # 1. pykrx 시도
                 df = stock.get_market_ohlcv_by_date(start_date, end_date, ticker)
                 
-                # 2. pykrx 실패 시 yfinance 백업
+                # 2. 백업: yfinance 시도
                 if df is None or df.empty or len(df) < 224:
                     for suffix in [".KS", ".KQ"]:
                         df_yf = yf.download(ticker + suffix, start=(datetime.now() - timedelta(days=450)), end=datetime.now(), progress=False, show_errors=False)
@@ -76,10 +76,8 @@ if btn_web or btn_tele:
                             break
 
                 if df is not None and not df.empty and len(df) >= 224:
-                    if isinstance(df['종가'], pd.DataFrame):
-                        close_series = df['종가'].iloc[:, 0]
-                    else:
-                        close_series = df['종가']
+                    # 데이터 차원 보정 (yfinance 대응)
+                    close_series = df['종가'].iloc[:, 0] if isinstance(df['종가'], pd.DataFrame) else df['종가']
 
                     ma120 = close_series.rolling(120).mean().iloc[-1]
                     ma224 = close_series.rolling(224).mean().iloc[-1]
@@ -93,7 +91,7 @@ if btn_web or btn_tele:
                             '테마3': row[4].strip() if len(row) > 4 else ""
                         })
                 
-                time.sleep(1.0) # Rate Limit 방지
+                time.sleep(0.7) # 안정적인 수집을 위한 지연시간
                 
             except Exception:
                 continue
@@ -103,20 +101,22 @@ if btn_web or btn_tele:
         if matched:
             res_df = pd.DataFrame(matched)
             
-            # [수정] 테마1, 테마2, 테마3 각각의 빈도 계산
+            # --- 고도화된 정렬 로직 ---
+            # 1. 각 테마별 전체 빈도 계산 (공백 제외)
             for t in ['테마1', '테마2', '테마3']:
                 counts = res_df[res_df[t] != ''][t].value_counts()
                 res_df[f'{t}_빈도'] = res_df[t].map(counts).fillna(0)
             
-            # [수정] 정렬 로직: 테마1 빈도 -> 테마2 빈도 -> 테마3 빈도 -> 종목명
+            # 2. 다중 조건 정렬 (핵심!)
+            # 테마1빈도(내림) -> 테마1이름(오름) -> 테마2빈도(내림) -> 테마2이름(오름) -> 테마3빈도(내림) -> 종목명(오름)
             res_df = res_df.sort_values(
-                by=['테마1_빈도', '테마2_빈도', '테마3_빈도', '종목명'], 
-                ascending=[False, False, False, True]
+                by=['테마1_빈도', '테마1', '테마2_빈도', '테마2', '테마3_빈도', '종목명'], 
+                ascending=[False, True, False, True, False, True]
             )
             
             st.success(f"✅ 총 {len(res_df)}개의 종목 발견 (기준일: {end_date})")
             
-            # 웹 화면 표시 (인덱스 제거 및 테마만 표시)
+            # 웹 화면 표시
             display_df = res_df[['종목명', '테마1', '테마2', '테마3']]
             st.dataframe(display_df, width='stretch', hide_index=True)
 
@@ -124,9 +124,9 @@ if btn_web or btn_tele:
                 msg = f"<b>🔔 [샌드위치 포착: {end_date}]</b>\n총 <b>{len(res_df)}건</b>\n\n"
                 
                 for _, r in res_df.iterrows():
-                    # [수정] 테마 1, 2, 3 중 데이터가 있는 것만 합치기
-                    themes = [r['테마1'], r['테마2'], r['테마3']]
-                    theme_str = ", ".join([t for t in themes if t.strip()])
+                    # 테마 1, 2, 3 전체 합치기 (비어있지 않은 것만)
+                    theme_list = [t for t in [r['테마1'], r['테마2'], r['테마3']] if t.strip()]
+                    theme_str = ", ".join(theme_list)
                     
                     msg += f"• <b>{r['종목명']}</b> | {theme_str}\n"
                 
