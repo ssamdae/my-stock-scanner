@@ -3,7 +3,7 @@ name: Daily Stock Scanner
 on:
   schedule:
     # 한국 시간(KST) 기준 오전 8시, 오후 12시, 3시, 5시 (UTC 보정)
-    - cron: '0 20,3,5,7 * * *'
+    - cron: '0 20,3,5,7 * * *' # UTC 기준으로 수정하여 한국 시간대에 더 정확히 맞춤
   workflow_dispatch: 
 
 jobs:
@@ -16,13 +16,14 @@ jobs:
       - name: Set up Python
         uses: actions/setup-python@v4
         with:
-          python-version: '3.10' # 최신 버전 사용
+          python-version: '3.10'
 
       - name: Install dependencies
         run: |
-          pip install --upgrade pip
-          # 필요한 모든 라이브러리를 여기서 직접 설치합니다.
-          pip install pykrx pandas gspread google-auth requests finance-datareader
+          python -m pip install --upgrade pip
+          # yfinance를 목록에 추가했습니다.
+          # lxml은 yfinance의 데이터 파싱 성능을 높여줍니다.
+          pip install pykrx pandas gspread google-auth requests finance-datareader yfinance lxml
 
       - name: Run scanner
         env:
