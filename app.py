@@ -27,7 +27,6 @@ def send_telegram_msg(message):
 
 # 3. 분석 실행 버튼
 col1, col2 = st.columns(2)
-# 최신 문법 적용: use_container_width -> width='stretch'
 btn_web = col1.button("🖥️ 웹으로 결과 보기", width='stretch')
 btn_tele = col2.button("🔔 웹 + 텔레그램 알림 받기", width='stretch')
 
@@ -68,9 +67,8 @@ if btn_web or btn_tele:
                 # 1. pykrx 시도
                 df = stock.get_market_ohlcv_by_date(start_date, end_date, ticker)
                 
-                # 2. pykrx 실패 시 yfinance 백업 (시장 자동 판별 로직 개선)
+                # 2. pykrx 실패 시 yfinance 백업
                 if df is None or df.empty or len(df) < 224:
-                    # 코스피/코스닥 둘 다 시도하여 데이터가 있는 쪽을 선택
                     for suffix in [".KS", ".KQ"]:
                         df_yf = yf.download(ticker + suffix, start=(datetime.now() - timedelta(days=450)), end=datetime.now(), progress=False, show_errors=False)
                         if not df_yf.empty and len(df_yf) >= 224:
@@ -78,7 +76,6 @@ if btn_web or btn_tele:
                             break
 
                 if df is not None and not df.empty and len(df) >= 224:
-                    # 종가 컬럼이 MultiIndex인 경우 처리 (yfinance 최신 버전 대응)
                     if isinstance(df['종가'], pd.DataFrame):
                         close_series = df['종가'].iloc[:, 0]
                     else:
@@ -93,15 +90,12 @@ if btn_web or btn_tele:
                             '종목명': name, 
                             '테마1': row[2].strip() if len(row) > 2 else "",
                             '테마2': row[3].strip() if len(row) > 3 else "",
-                            '테마3': row[4].strip() if len(row) > 4 else "",
-                            'sort_key': row[2].strip() if len(row) > 2 else "" # 정렬용
+                            '테마3': row[4].strip() if len(row) > 4 else ""
                         })
                 
-                # [중요] Rate Limit 방지를 위해 대기 시간 조절 (0.1 -> 0.5)
-                # 종목 수가 많다면 1.0까지 늘리는 것을 권장합니다.
-                time.sleep(1.0)
+                time.sleep(1.0) # Rate Limit 방지
                 
-            except Exception as e:
+            except Exception:
                 continue
 
         status_text.empty()
@@ -109,22 +103,37 @@ if btn_web or btn_tele:
         if matched:
             res_df = pd.DataFrame(matched)
             
-            # 테마 빈도 계산 및 정렬
-            f1 = res_df[res_df['테마1'] != '']['테마1'].value_counts()
-            res_df['빈도'] = res_df['테마1'].map(f1).fillna(0)
-            res_df = res_df.sort_values(by=['빈도', '테마1', '종목명'], ascending=[False, True, True])
+            # [수정] 테마1, 테마2, 테마3 각각의 빈도 계산
+            for t in ['테마1', '테마2', '테마3']:
+                counts = res_df[res_df[t] != ''][t].value_counts()
+                res_df[f'{t}_빈도'] = res_df[t].map(counts).fillna(0)
             
-            st.success(f"✅ 총 {len(res_df)}개의 종목 발견")
+            # [수정] 정렬 로직: 테마1 빈도 -> 테마2 빈도 -> 테마3 빈도 -> 종목명
+            res_df = res_df.sort_values(
+                by=['테마1_빈도', '테마2_빈도', '테마3_빈도', '종목명'], 
+                ascending=[False, False, False, True]
+            )
             
-            # 요청사항: 종목명, 테마1, 테마2, 테마3만 표시 + 인덱스 삭제
+            st.success(f"✅ 총 {len(res_df)}개의 종목 발견 (기준일: {end_date})")
+            
+            # 웹 화면 표시 (인덱스 제거 및 테마만 표시)
             display_df = res_df[['종목명', '테마1', '테마2', '테마3']]
             st.dataframe(display_df, width='stretch', hide_index=True)
 
             if btn_tele:
                 msg = f"<b>🔔 [샌드위치 포착: {end_date}]</b>\n총 <b>{len(res_df)}건</b>\n\n"
+                
                 for _, r in res_df.iterrows():
-                    msg += f"• <b>{r['종목명']}</b> | {r['테마1']}\n"
-                send_telegram_msg(msg)
+                    # [수정] 테마 1, 2, 3 중 데이터가 있는 것만 합치기
+                    themes = [r['테마1'], r['테마2'], r['테마3']]
+                    theme_str = ", ".join([t for t in themes if t.strip()])
+                    
+                    msg += f"• <b>{r['종목명']}</b> | {theme_str}\n"
+                
+                if send_telegram_msg(msg):
+                    st.toast("텔레그램 전송 완료!")
+                else:
+                    st.error("텔레그램 전송에 실패했습니다.")
         else:
             st.warning("조건에 맞는 종목이 없습니다.")
 
