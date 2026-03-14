@@ -119,7 +119,8 @@ if btn_web or btn_tele:
             # 웹 화면 표시
             display_df = res_df[['종목명', '테마1', '테마2', '테마3']]
             #st.dataframe(display_df, width='stretch', hide_index=True)
-            st.dataframe(display_df, width='stretch', height=600, hide_index=True)
+            #st.dataframe(display_df, width='stretch', height=600, hide_index=True)
+            st.dataframe(display_df, width='stretch', height='stretch', hide_index=True)
 
             if btn_tele:
                 msg = f"<b>🔔 [샌드위치 포착: {end_date}]</b>\n총 <b>{len(res_df)}건</b>\n\n"
