@@ -11,11 +11,7 @@ import yfinance as yf
 # 1. 페이지 설정
 st.set_page_config(page_title="돌파", layout="wide")
 st.title("🚀돌파")
-st.markdown("""
-- **돌파 조건**: 전일 종가가 120선/224선 아래에 있다가, 오늘 종가가 상단 이평선을 돌파
-- **거래량 조건**: 현재 거래량이 전일 전체 거래량 대비 **200%(2배)** 이상 발생
----
-""")
+
 
 # 2. 텔레그램 전송 함수
 def send_telegram_msg(message):
