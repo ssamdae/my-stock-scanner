@@ -16,7 +16,6 @@ def run_analysis():
         )
         gc = gspread.authorize(creds)
         
-        # 시트 데이터 가져오기 (A: 티커, B: 종목명, C~E: 테마)
         sheet = gc.open("관심종목").get_worksheet(0)
         rows = sheet.get_all_values()[1:] # 헤더 제외
         
@@ -35,8 +34,8 @@ def run_analysis():
         for row in rows:
             if not row or not row[0]: continue
             
-            ticker = row[0].strip() # A열: 티커
-            name = row[1].strip()   # B열: 종목명
+            ticker = row[0].strip()
+            name = row[1].strip()
             
             print(f"분석 중: {name} ({ticker})...")
             
@@ -45,62 +44,72 @@ def run_analysis():
                 # [방법 1] pykrx 시도
                 df = stock.get_market_ohlcv_by_date(start_date, valid_date, ticker)
                 
-                # [방법 2] pykrx 실패 시 yfinance 백업
+                # [방법 2] yfinance 백업
                 if df is None or df.empty or len(df) < 224:
                     for suffix in [".KS", ".KQ"]:
                         df_yf = yf.download(f"{ticker}{suffix}", start=(now - timedelta(days=450)), end=now, progress=False, show_errors=False)
                         if not df_yf.empty and len(df_yf) >= 224:
-                            # yfinance 최신 버전의 MultiIndex 종가 처리
-                            if isinstance(df_yf['Close'], pd.DataFrame):
-                                close_series = df_yf['Close'].iloc[:, 0]
-                            else:
-                                close_series = df_yf['Close']
-                            
-                            df = pd.DataFrame({'종가': close_series})
+                            df = df_yf.rename(columns={'Close': '종가', 'Volume': '거래량'})
                             break
 
-                # 4. 샌드위치 조건 계산
+                # 4. 새로운 조건 계산 (상단 이평 돌파 + 거래량 2배)
                 if df is not None and not df.empty and len(df) >= 224:
-                    ma120 = df['종가'].rolling(120).mean().iloc[-1]
-                    ma224 = df['종가'].rolling(224).mean().iloc[-1]
-                    close = df['종가'].iloc[-1]
+                    # 컬럼명 통일
+                    if 'Volume' in df.columns: df = df.rename(columns={'Volume': '거래량'})
+                    if 'Close' in df.columns: df = df.rename(columns={'Close': '종가'})
 
-                    if (ma224 < close < ma120) or (ma120 < close < ma224):
+                    # 데이터 차원 보정 (Multi-index 대응)
+                    close_s = df['종가'].iloc[:, 0] if isinstance(df['종가'], pd.DataFrame) else df['종가']
+                    vol_s = df['거래량'].iloc[:, 0] if isinstance(df['거래량'], pd.DataFrame) else df['거래량']
+
+                    ma120 = close_s.rolling(120).mean().iloc[-1]
+                    ma224 = close_s.rolling(224).mean().iloc[-1]
+                    upper_ma = max(ma120, ma224)
+                    
+                    prev_close = close_s.iloc[-2]
+                    last_close = close_s.iloc[-1]
+                    prev_vol = vol_s.iloc[-2]
+                    last_vol = vol_s.iloc[-1]
+                    
+                    vol_ratio = (last_vol / prev_vol * 100) if prev_vol > 0 else 0
+
+                    # 조건 검증
+                    if (prev_close < upper_ma < last_close) and (vol_ratio >= 200):
                         matched.append({
-                            'name': name, 
+                            'name': name,
+                            'vol_ratio': f"{vol_ratio:.1f}%",
                             't1': row[2].strip() if len(row) > 2 else "",
                             't2': row[3].strip() if len(row) > 3 else "",
                             't3': row[4].strip() if len(row) > 4 else ""
                         })
                 
-                # 서버 차단 방지를 위한 지연 시간 (GitHub Actions 환경은 IP 공유로 인해 0.5초 이상 권장)
                 time.sleep(0.5)
                 
             except Exception as e:
-                print(f"Error analyzing {name}: {e}")
+                print(f"Error {name}: {e}")
                 continue
 
-        # 5. 결과 정렬 및 텔레그램 전송
+        # 5. 결과 전송
         if matched:
             df_res = pd.DataFrame(matched)
-            # 테마1 빈도 기준 정렬
+            # 테마 빈도 정렬
             f1 = df_res[df_res['t1'] != '']['t1'].value_counts()
             df_res['b1'] = df_res['t1'].map(f1).fillna(0)
             df_res = df_res.sort_values(by=['b1', 't1', 'name'], ascending=[False, True, True])
             
-            msg = f"<b>🔔 [샌드위치 리포트] {valid_date}</b>\n총 <b>{len(df_res)}건</b> 발견\n\n"
+            msg = f"<b>🚀 [강력 돌파 리포트] {valid_date}</b>\n"
+            msg += f"상단 이평 돌파 + 거래량 200%↑\n"
+            msg += f"총 <b>{len(df_res)}건</b> 발견\n\n"
+            
             for _, r in df_res.iterrows():
                 themes = f"#{r['t1']}"
                 if r['t2']: themes += f" #{r['t2']}"
                 if r['t3']: themes += f" #{r['t3']}"
-                msg += f"• <b>{r['name']}</b> | {themes}\n"
+                msg += f"• <b>{r['name']}</b> (🔥{r['vol_ratio']}) | {themes}\n"
             
-            # 텔레그램 API 호출
             token = os.environ['TELEGRAM_BOT_TOKEN']
             chat_id = os.environ['TELEGRAM_CHAT_ID']
             url = f"https://api.telegram.org/bot{token}/sendMessage"
-            
-            # 메시지 길이가 너무 길 경우를 대비해 분할 전송 (필요 시)
             requests.post(url, data={"chat_id": chat_id, "text": msg[:4000], "parse_mode": "HTML"})
             print(f"전송 완료: {len(df_res)}건")
         else:
