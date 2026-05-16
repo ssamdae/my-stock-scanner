@@ -5,7 +5,11 @@ from datetime import datetime, timedelta
 import os
 import requests
 import yfinance as yf
+import socket  # 💡 무한 대기 방지용 소켓 라이브러리 추가
 from concurrent.futures import ThreadPoolExecutor, as_completed
+
+# 💡 [핵심] 글로벌 소켓 타임아웃을 7초로 제한 (네트워크 먹통으로 인한 스레드 멈춤 원천 차단)
+socket.setdefaulttimeout(7)
 
 # 1. 페이지 설정
 st.set_page_config(page_title="돌파", layout="wide")
@@ -25,7 +29,7 @@ def send_telegram_msg(message):
         return False
 
 
-# 개별 종목 분석용 워커 함수 (ThreadPoolExecutor에 의해 병렬 실행)
+# 개별 종목 분석용 워커 함수 (멀티스레드)
 def analyze_single_stock(row, start_date, end_date):
     if not row or not row[0]: 
         return None
@@ -41,12 +45,15 @@ def analyze_single_stock(row, start_date, end_date):
         # 2. 백업: yfinance 시도 (pykrx 실패 시)
         if df is None or df.empty or len(df) < 224:
             for suffix in [".KS", ".KQ"]:
+                # 💡 threads=False 옵션을 주어 멀티스레드 내부에서 데드락이 걸리는 현상 방지
                 df_yf = yf.download(
                     ticker + suffix, 
                     start=(datetime.now() - timedelta(days=450)), 
                     end=datetime.now(), 
                     progress=False, 
-                    show_errors=False
+                    show_errors=False,
+                    threads=False,
+                    timeout=5
                 )
                 if not df_yf.empty and len(df_yf) >= 224:
                     df = df_yf.rename(columns={'Close': '종가', 'Volume': '거래량'})
@@ -56,16 +63,13 @@ def analyze_single_stock(row, start_date, end_date):
             if 'Volume' in df.columns: df = df.rename(columns={'Volume': '거래량'})
             if 'Close' in df.columns: df = df.rename(columns={'Close': '종가'})
 
-            # 데이터 차원 보정 (Multi-index 대응)
             close_series = df['종가'].iloc[:, 0] if isinstance(df['종가'], pd.DataFrame) else df['종가']
             vol_series = df['거래량'].iloc[:, 0] if isinstance(df['거래량'], pd.DataFrame) else df['거래량']
 
-            # 이평선 계산 (120일선, 224일선)
             ma120 = close_series.rolling(120).mean().iloc[-1]
             ma224 = close_series.rolling(224).mean().iloc[-1]
-            upper_ma = max(ma120, ma224) # 두 이평선 중 더 높은 선
+            upper_ma = max(ma120, ma224)
 
-            # 가격 및 거래량 조건 확인
             prev_close = close_series.iloc[-2]
             last_close = close_series.iloc[-1]
             
@@ -73,7 +77,6 @@ def analyze_single_stock(row, start_date, end_date):
             last_vol = vol_series.iloc[-1]
             vol_ratio = (last_vol / prev_vol * 100) if prev_vol > 0 else 0
 
-            # 최종 조건: 상단 이평선 돌파 AND 거래량 200% 이상
             is_breakout = prev_close < upper_ma < last_close
             is_vol_surge = vol_ratio >= 200
 
@@ -98,7 +101,6 @@ btn_tele = col2.button("🔔 웹 + 텔레그램 알림 받기", use_container_wi
 
 if btn_web or btn_tele:
     try:
-        # 💡 반영 내용 1: 정확한 프로젝트 폴더 내 영어 파일명 경로 지정
         csv_path = os.path.expanduser("~/my-stock-scanner/watchlist.csv")
         
         if not os.path.exists(csv_path):
@@ -106,8 +108,7 @@ if btn_web or btn_tele:
             st.stop()
             
         with st.spinner('서버 로컬 CSV 파일에서 종목을 불러오는 중...'):
-            # 💡 반영 내용 2: 엑셀 UTF-8 BOM 한글 깨짐 방지(utf-8-sig) 및 티커 문자열 유지 적용
-            df_stocks = pd.read_csv(csv_path, dtype={'티커': str}, encoding='utf-8-sig').fillna('')
+            df_stocks = pd.read_csv(csv_path, dtype={'티कर': str}, encoding='utf-8-sig').fillna('')
             rows = df_stocks.values.tolist()
             
             if not rows:
@@ -121,8 +122,8 @@ if btn_web or btn_tele:
         end_date = datetime.now().strftime("%Y%m%d")
         start_date = (datetime.now() - timedelta(days=450)).strftime("%Y%m%d")
 
-        # 💡 멀티스레딩 병렬 스캔 실행 (최대 8개 스레드 동시 가동)
-        with ThreadPoolExecutor(max_workers=8) as executor:
+        # 💡 사양과 API 제한을 고려해 max_workers를 5로 안전하게 하향 조정
+        with ThreadPoolExecutor(max_workers=5) as executor:
             futures = {executor.submit(analyze_single_stock, row, start_date, end_date): row for row in rows}
             
             completed_count = 0
@@ -131,12 +132,12 @@ if btn_web or btn_tele:
                 row = futures[future]
                 name = row[1].strip() if len(row) > 1 else "Unknown"
                 
-                # 메인 스레드에서 UI 실시간 업데이트
                 progress_bar.progress(completed_count / len(rows))
                 status_text.text(f"진행 중 ({completed_count}/{len(rows)}): {name}")
                 
                 try:
-                    result = future.result()
+                    # 💡 혹시 모를 내부 예외 상황도 5초 타임아웃으로 방어
+                    result = future.result(timeout=5)
                     if result is not None:
                         matched.append(result)
                 except Exception:
@@ -148,7 +149,6 @@ if btn_web or btn_tele:
         if matched:
             res_df = pd.DataFrame(matched)
             
-            # 테마 빈도 기반 정렬 로직
             for t in ['테마1', '테마2', '테마3']:
                 counts = res_df[res_df[t] != ''][t].value_counts()
                 res_df[f'{t}_빈도'] = res_df[t].map(counts).fillna(0)
@@ -160,7 +160,6 @@ if btn_web or btn_tele:
             
             st.success(f"✅ 총 {len(res_df)}개의 돌파 종목 발견! (기준일: {end_date})")
             
-            # 웹 화면 표시
             display_df = res_df[['종목명', '현재가', '거래량비율', '테마1', '테마2', '테마3']]
             st.dataframe(display_df, use_container_width=True, hide_index=True)
 
