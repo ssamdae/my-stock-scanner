@@ -5,11 +5,6 @@ from datetime import datetime, timedelta
 import os
 import requests
 import yfinance as yf
-import socket  # 💡 무한 대기 방지용 소켓 라이브러리 추가
-from concurrent.futures import ThreadPoolExecutor, as_completed
-
-# 💡 [핵심] 글로벌 소켓 타임아웃을 7초로 제한 (네트워크 먹통으로 인한 스레드 멈춤 원천 차단)
-socket.setdefaulttimeout(7)
 
 # 1. 페이지 설정
 st.set_page_config(page_title="돌파", layout="wide")
@@ -29,71 +24,6 @@ def send_telegram_msg(message):
         return False
 
 
-# 개별 종목 분석용 워커 함수 (멀티스레드)
-def analyze_single_stock(row, start_date, end_date):
-    if not row or not row[0]: 
-        return None
-        
-    ticker = row[0].strip()
-    name = row[1].strip()
-    df = None
-    
-    try:
-        # 1. pykrx 시도
-        df = stock.get_market_ohlcv_by_date(start_date, end_date, ticker)
-        
-        # 2. 백업: yfinance 시도 (pykrx 실패 시)
-        if df is None or df.empty or len(df) < 224:
-            for suffix in [".KS", ".KQ"]:
-                # 💡 threads=False 옵션을 주어 멀티스레드 내부에서 데드락이 걸리는 현상 방지
-                df_yf = yf.download(
-                    ticker + suffix, 
-                    start=(datetime.now() - timedelta(days=450)), 
-                    end=datetime.now(), 
-                    progress=False, 
-                    show_errors=False,
-                    threads=False,
-                    timeout=5
-                )
-                if not df_yf.empty and len(df_yf) >= 224:
-                    df = df_yf.rename(columns={'Close': '종가', 'Volume': '거래량'})
-                    break
-
-        if df is not None and not df.empty and len(df) >= 224:
-            if 'Volume' in df.columns: df = df.rename(columns={'Volume': '거래량'})
-            if 'Close' in df.columns: df = df.rename(columns={'Close': '종가'})
-
-            close_series = df['종가'].iloc[:, 0] if isinstance(df['종가'], pd.DataFrame) else df['종가']
-            vol_series = df['거래량'].iloc[:, 0] if isinstance(df['거래량'], pd.DataFrame) else df['거래량']
-
-            ma120 = close_series.rolling(120).mean().iloc[-1]
-            ma224 = close_series.rolling(224).mean().iloc[-1]
-            upper_ma = max(ma120, ma224)
-
-            prev_close = close_series.iloc[-2]
-            last_close = close_series.iloc[-1]
-            
-            prev_vol = vol_series.iloc[-2]
-            last_vol = vol_series.iloc[-1]
-            vol_ratio = (last_vol / prev_vol * 100) if prev_vol > 0 else 0
-
-            is_breakout = prev_close < upper_ma < last_close
-            is_vol_surge = vol_ratio >= 200
-
-            if is_breakout and is_vol_surge:
-                return {
-                    '종목명': name, 
-                    '현재가': f"{int(last_close):,}",
-                    '거래량비율': f"{vol_ratio:.1f}%",
-                    '테마1': row[2].strip() if len(row) > 2 else "",
-                    '테마2': row[3].strip() if len(row) > 3 else "",
-                    '테마3': row[4].strip() if len(row) > 4 else ""
-                }
-    except Exception:
-        pass
-    return None
-
-
 # 3. 분석 실행 버튼
 col1, col2 = st.columns(2)
 btn_web = col1.button("🖥️ 웹으로 결과 보기", use_container_width=True)
@@ -104,44 +34,114 @@ if btn_web or btn_tele:
         csv_path = os.path.expanduser("~/my-stock-scanner/watchlist.csv")
         
         if not os.path.exists(csv_path):
-            st.error(f"❌ 서버 내에 watchlist.csv 파일이 없습니다. 경로를 확인해 주세요: {csv_path}")
+            st.error(f"❌ 서버 내에 watchlist.csv 파일이 없습니다. 경로 확인 필수: {csv_path}")
             st.stop()
             
         with st.spinner('서버 로컬 CSV 파일에서 종목을 불러오는 중...'):
-            df_stocks = pd.read_csv(csv_path, dtype={'티कर': str}, encoding='utf-8-sig').fillna('')
+            df_stocks = pd.read_csv(csv_path, dtype={'티커': str}, encoding='utf-8-sig').fillna('')
             rows = df_stocks.values.tolist()
             
             if not rows:
                 st.warning("분석할 종목 데이터가 없습니다.")
                 st.stop()
 
+        with st.spinner('시장 데이터 동기화 중...'):
+            kospi_tickers = set(stock.get_market_ticker_list(market="KOSPI"))
+
+        # 야후 파이낸스용 일괄 요청 티커 배열 만들기
+        yf_tickers = []
+        ticker_to_row = {}  # 데이터 파싱 시 테마 매칭용 딕셔너리
+        
+        for row in rows:
+            if not row or not row[0]: continue
+            
+            # 앞뒤 공백을 자른 뒤 문자열로 강제 변환
+            ticker = str(row[0]).strip()
+            
+            # 대한민국 주식 티커 6자리 숫자 형태 검증 (유령 공백 행 완벽 필터링)
+            if len(ticker) != 6 or not ticker.isdigit(): 
+                continue
+                
+            suffix = ".KS" if ticker in kospi_tickers else ".KQ"
+            yf_ticker = ticker + suffix
+            
+            # CSV 내 중복 등록 종목 중복 스캔 방지
+            if yf_ticker not in yf_tickers:
+                yf_tickers.append(yf_ticker)
+                ticker_to_row[yf_ticker] = row
+
+        # 데이터 다운로드 실행
+        with st.spinner(f'🚀 야후 파이낸스에서 {len(yf_tickers)}개 종목 대량 멀티 데이터 다운로드 중...'):
+            end_date_dt = datetime.now()
+            # 💡 [반영 사항] 불필요한 과거 데이터를 줄이고 안전 마진만 남긴 360일 설정
+            start_date_dt = end_date_dt - timedelta(days=360)
+            
+            df_all = yf.download(
+                tickers=yf_tickers,
+                start=start_date_dt,
+                end=end_date_dt,
+                group_by='ticker',
+                progress=False,
+                show_errors=False
+            )
+
+        if df_all.empty:
+            st.error("데이터를 불러오지 못했습니다. 야후 파이낸스 통신을 확인해 주세요.")
+            st.stop()
+
+        # 거대 DataFrame을 메모리 상에서 초고속 루프 연산
         matched = []
         progress_bar = st.progress(0)
         status_text = st.empty()
         
-        end_date = datetime.now().strftime("%Y%m%d")
-        start_date = (datetime.now() - timedelta(days=450)).strftime("%Y%m%d")
-
-        # 💡 사양과 API 제한을 고려해 max_workers를 5로 안전하게 하향 조정
-        with ThreadPoolExecutor(max_workers=5) as executor:
-            futures = {executor.submit(analyze_single_stock, row, start_date, end_date): row for row in rows}
+        total_tickers = len(yf_tickers)
+        for idx, yf_ticker in enumerate(yf_tickers):
+            progress_bar.progress((idx + 1) / total_tickers)
+            row = ticker_to_row[yf_ticker]
+            name = row[1].strip()
+            status_text.text(f"초고속 연산 중 ({idx+1}/{total_tickers}): {name}")
             
-            completed_count = 0
-            for future in as_completed(futures):
-                completed_count += 1
-                row = futures[future]
-                name = row[1].strip() if len(row) > 1 else "Unknown"
+            try:
+                if yf_ticker in df_all.columns.levels[0]:
+                    df_stock = df_all[yf_ticker].dropna(subset=['Close'])
+                else:
+                    if total_tickers == 1:
+                        df_stock = df_all.dropna(subset=['Close'])
+                    else:
+                        continue
                 
-                progress_bar.progress(completed_count / len(rows))
-                status_text.text(f"진행 중 ({completed_count}/{len(rows)}): {name}")
+                if len(df_stock) < 224: 
+                    continue
                 
-                try:
-                    # 💡 혹시 모를 내부 예외 상황도 5초 타임아웃으로 방어
-                    result = future.result(timeout=5)
-                    if result is not None:
-                        matched.append(result)
-                except Exception:
-                    pass
+                close_series = df_stock['Close']
+                vol_series = df_stock['Volume']
+
+                # 이평선 연산 (120일선, 224일선)
+                ma120 = close_series.rolling(120).mean().iloc[-1]
+                ma224 = close_series.rolling(224).mean().iloc[-1]
+                upper_ma = max(ma120, ma224)
+
+                prev_close = close_series.iloc[-2]
+                last_close = close_series.iloc[-1]
+                
+                prev_vol = vol_series.iloc[-2]
+                last_vol = vol_series.iloc[-1]
+                vol_ratio = (last_vol / prev_vol * 100) if prev_vol > 0 else 0
+
+                is_breakout = prev_close < upper_ma < last_close
+                is_vol_surge = vol_ratio >= 200
+
+                if is_breakout and is_vol_surge:
+                    matched.append({
+                        '종목명': name, 
+                        '현재가': f"{int(last_close):,}",
+                        '거래량비율': f"{vol_ratio:.1f}%",
+                        '테마1': row[2].strip() if len(row) > 2 else "",
+                        '테마2': row[3].strip() if len(row) > 3 else "",
+                        '테마3': row[4].strip() if len(row) > 4 else ""
+                    })
+            except Exception:
+                continue
 
         status_text.empty()
         progress_bar.empty()
@@ -154,31 +154,4 @@ if btn_web or btn_tele:
                 res_df[f'{t}_빈도'] = res_df[t].map(counts).fillna(0)
             
             res_df = res_df.sort_values(
-                by=['테마1_빈도', '테마1', '테마2_빈도', '테마2', '테마3_빈도', '종목명'], 
-                ascending=[False, True, False, True, False, True]
-            )
-            
-            st.success(f"✅ 총 {len(res_df)}개의 돌파 종목 발견! (기준일: {end_date})")
-            
-            display_df = res_df[['종목명', '현재가', '거래량비율', '테마1', '테마2', '테마3']]
-            st.dataframe(display_df, use_container_width=True, hide_index=True)
-
-            if btn_tele:
-                msg = f"<b>🚀 [강력 돌파 포착: {end_date}]</b>\n"
-                msg += f"상단 이평선 돌파 + 거래량 200%↑\n"
-                msg += f"총 <b>{len(res_df)}건</b>\n\n"
-                
-                for _, r in res_df.iterrows():
-                    theme_list = [t for t in [r['테마1'], r['테마2'], r['테마3']] if t.strip()]
-                    theme_str = ", ".join(theme_list)
-                    msg += f"• <b>{r['종목명']}</b> (🔥{r['거래량비율']}) | {theme_str}\n"
-                
-                if send_telegram_msg(msg):
-                    st.toast("텔레그램 전송 완료!")
-                else:
-                    st.error("텔레그램 전송 실패")
-        else:
-            st.warning("조건(돌파 + 거래량 2배)에 맞는 종목이 없습니다.")
-
-    except Exception as e:
-        st.error(f"❌ 시스템 오류: {str(e)}")
+                by=
