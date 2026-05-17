@@ -70,10 +70,9 @@ if btn_web or btn_tele:
                 yf_tickers.append(yf_ticker)
                 ticker_to_row[yf_ticker] = row
 
-        # 데이터 다운로드 실행
+        # 데이터 다운로드 실행 (360일 최적화 반영)
         with st.spinner(f'🚀 야후 파이낸스에서 {len(yf_tickers)}개 종목 대량 멀티 데이터 다운로드 중...'):
             end_date_dt = datetime.now()
-            # 💡 [반영 사항] 불필요한 과거 데이터를 줄이고 안전 마진만 남긴 360일 설정
             start_date_dt = end_date_dt - timedelta(days=360)
             
             df_all = yf.download(
@@ -153,5 +152,31 @@ if btn_web or btn_tele:
                 counts = res_df[res_df[t] != ''][t].value_counts()
                 res_df[f'{t}_빈도'] = res_df[t].map(counts).fillna(0)
             
-            res_df = res_df.sort_values(
-                by=
+            # 💡 [문법오류 해결] 정렬 구문을 한 줄로 완벽히 묶어 인코딩/오독 에러를 원천 차단했습니다.
+            res_df = res_df.sort_values(by=['테마1_빈도', '테마1', '테마2_빈도', '테마2', '테마3_빈도', '종목명'], ascending=[False, True, False, True, False, True])
+            
+            st.success(f"✅ 총 {len(res_df)}개의 돌파 종목 발견! (기준일: {datetime.now().strftime('%Y%m%d')})")
+            
+            # 웹 화면 표시
+            display_df = res_df[['종목명', '현재가', '거래량비율', '테마1', '테마2', '테마3']]
+            st.dataframe(display_df, use_container_width=True, hide_index=True)
+
+            if btn_tele:
+                msg = f"<b>🚀 [강력 돌파 포착: {datetime.now().strftime('%Y%m%d')}]</b>\n"
+                msg += f"상단 이평선 돌파 + 거래량 200%↑\n"
+                msg += f"총 <b>{len(res_df)}건</b>\n\n"
+                
+                for _, r in res_df.iterrows():
+                    theme_list = [t for t in [r['테마1'], r['테마2'], r['테마3']] if t.strip()]
+                    theme_str = ", ".join(theme_list)
+                    msg += f"• <b>{r['종목명']}</b> (🔥{r['거래량비율']}) | {theme_str}\n"
+                
+                if send_telegram_msg(msg):
+                    st.toast("텔레그램 전송 완료!")
+                else:
+                    st.error("텔레그램 전송 실패")
+        else:
+            st.warning("조건(돌파 + 거래량 2배)에 맞는 종목이 없습니다.")
+
+    except Exception as e:
+        st.error(f"❌ 시스템 오류: {str(e)}")
