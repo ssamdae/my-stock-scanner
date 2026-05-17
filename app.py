@@ -45,7 +45,6 @@ if btn_web or btn_tele:
                 st.stop()
 
         with st.spinner('시장 데이터 동기화 중...'):
-            # 임시로 빈 세트를 만들어 pykrx 장애 상황 전면 방어
             kospi_tickers = set()
 
         # 야후 파이낸스용 일괄 요청 티커 배열 만들기
@@ -60,7 +59,6 @@ if btn_web or btn_tele:
             if len(ticker) != 6 or not ticker.isdigit(): 
                 continue
             
-            # 모든 종목에 대해 .KS와 .KQ 두 시장을 모두 후보군으로 등록하여 일괄 청구
             for suffix in [".KS", ".KQ"]:
                 target = ticker + suffix
                 if target not in requested_set:
@@ -77,7 +75,6 @@ if btn_web or btn_tele:
             end_date_dt = datetime.now()
             start_date_dt = end_date_dt - timedelta(days=360)
             
-            # 💡 [버그 해결] 문제가 되었던 호환성 유발 옵션 'show_errors=False'를 완벽히 제거했습니다.
             df_all = yf.download(
                 tickers=yf_tickers,
                 start=start_date_dt,
@@ -106,7 +103,6 @@ if btn_web or btn_tele:
             df_stock = None
             current_row = None
             
-            # 데이터셋에서 .KS와 .KQ 중 실데이터가 존재하는 유효 종목 세트 추출
             for suffix in [".KS", ".KQ"]:
                 target = ticker + suffix
                 current_row = ticker_to_row.get(target)
@@ -180,3 +176,19 @@ if btn_web or btn_tele:
             if btn_tele:
                 msg = f"<b>🚀 [강력 돌파 포착: {datetime.now().strftime('%Y%m%d')}]</b>\n"
                 msg += f"상단 이평선 돌파 + 거래량 200%↑\n"
+                msg += f"총 <b>{len(res_df)}건</b>\n\n"
+                
+                for _, r in res_df.iterrows():
+                    theme_list = [t for t in [r['테마1'], r['테마2'], r['테마3']] if t.strip()]
+                    theme_str = ", ".join(theme_list)
+                    msg += f"• <b>{r['종목명']}</b> (🔥{r['거래량비율']}) | {theme_str}\n"
+                
+                if send_telegram_msg(msg):
+                    st.toast("텔레그램 전송 완료!")
+                else:
+                    st.error("텔레그램 전송 실패")
+        else:
+            st.warning("조건(돌파 + 거래량 2배)에 맞는 종목이 없습니다.")
+
+    except Exception as e:
+        st.error(f"❌ 시스템 오류: {str(e)}")
