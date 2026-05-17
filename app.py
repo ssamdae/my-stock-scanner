@@ -1,5 +1,4 @@
 import streamlit as st
-from pykrx import stock
 import pandas as pd
 from datetime import datetime, timedelta
 import os
@@ -45,58 +44,46 @@ if btn_web or btn_tele:
                 st.warning("분석할 종목 데이터가 없습니다.")
                 st.stop()
 
-        with st.spinner('시장 데이터 동기화 중...'):
-            kospi_tickers = set(stock.get_market_ticker_list(market="KOSPI"))
-
+        # 💡 [핵심 개선] 불안정한 pykrx 외부 통신을 차단하고, 야후 파이낸스용 .KS / .KQ 듀얼 티커 배열을 생성합니다.
         yf_tickers = []
         ticker_to_row = {}
+        requested_set = set()
         
         for row in rows:
             if not row or not row[0]: continue
-            
             ticker = str(row[0]).strip()
             
-            # 대한민국 주식 티커 6자리 숫자 형태 검증
             if len(ticker) != 6 or not ticker.isdigit(): 
                 continue
-                
-            suffix = ".KS" if ticker in kospi_tickers else ".KQ"
-            yf_ticker = ticker + suffix
             
-            if yf_ticker not in yf_tickers:
-                yf_tickers.append(yf_ticker)
-                ticker_to_row[yf_ticker] = row
+            # 한 종목당 코스피(.KS), 코스닥(.KQ) 후보를 둘 다 등록하여 한 번에 청구합니다.
+            for suffix in [".KS", ".KQ"]:
+                target = ticker + suffix
+                if target not in requested_set:
+                    yf_tickers.append(target)
+                    requested_set.add(target)
+                    ticker_to_row[target] = row
 
-        # 💡 [방어 레이어 1] 추출된 티커가 존재하지 않을 경우 야후 파이낸스 요청 전 차단
         if not yf_tickers:
-            st.error("❌ CSV 파일에서 유효한 6자리 주식 티커를 단 하나도 찾지 못했습니다. '티커' 컬럼 데이터의 상태나 파일 인코딩을 점검해 주세요.")
+            st.error("❌ CSV 파일에서 유효한 주식 티커를 찾지 못했습니다.")
             st.stop()
-            
-        st.info(f"📦 총 {len(yf_tickers)}개의 유효 종목을 야후 파이낸스에 청구합니다.")
 
-        # 데이터 다운로드 실행 (360일 최적화)
-        df_all = pd.DataFrame()
-        try:
-            with st.spinner(f'🚀 야후 파이낸스에서 {len(yf_tickers)}개 종목 대량 멀티 데이터 다운로드 중...'):
-                end_date_dt = datetime.now()
-                start_date_dt = end_date_dt - timedelta(days=360)
-                
-                df_all = yf.download(
-                    tickers=yf_tickers,
-                    start=start_date_dt,
-                    end=end_date_dt,
-                    group_by='ticker',
-                    progress=False,
-                    show_errors=False
-                )
-        # 💡 [방어 레이어 2] 야후 파이낸스 패키지 내부 가공 오류(IndexError 등) 원천 격리
-        except Exception as yf_err:
-            st.error(f"❌ 야후 파이낸스 엔진 내부 통신/조립 오류 발생: {str(yf_err)}")
-            st.info("💡 해결법: 오라클 서버 터미널에서 [ pip install --upgrade yfinance ] 명령어를 실행해 라이브러리를 최신판으로 업데이트해 주십시오.")
-            st.stop()
+        # 데이터 다운로드 실행 (360일 최적화 세팅)
+        with st.spinner(f'🚀 야후 파이낸스에서 {len(yf_tickers) // 2}개 종목 데이터 일괄 다운로드 중...'):
+            end_date_dt = datetime.now()
+            start_date_dt = end_date_dt - timedelta(days=360)
+            
+            df_all = yf.download(
+                tickers=yf_tickers,
+                start=start_date_dt,
+                end=end_date_dt,
+                group_by='ticker',
+                progress=False,
+                show_errors=False
+            )
 
         if df_all is None or df_all.empty:
-            st.error("❌ 야후 파이낸스로부터 반환된 데이터셋이 텅 비어 있습니다. 잠시 후 다시 시도해 주세요.")
+            st.error("❌ 야후 파이낸스로부터 데이터를 수집하지 못했습니다.")
             st.stop()
 
         # 거대 DataFrame을 메모리 상에서 초고속 루프 연산
@@ -104,32 +91,45 @@ if btn_web or btn_tele:
         progress_bar = st.progress(0)
         status_text = st.empty()
         
-        # 💡 [방어 레이어 3] 멀티인덱스 컬럼 구조가 안전하게 정상 생성되었는지 확인
         is_multi_index = isinstance(df_all.columns, pd.MultiIndex)
-        total_tickers = len(yf_tickers)
         
-        for idx, yf_ticker in enumerate(yf_tickers):
-            progress_bar.progress((idx + 1) / total_tickers)
-            row = ticker_to_row[yf_ticker]
-            name = row[1].strip()
-            status_text.text(f"초고속 연산 중 ({idx+1}/{total_tickers}): {name}")
+        # 중복 연산을 방지하기 위해 순수 종목 리스트 기준으로 루프를 돕니다.
+        unique_tickers = list(dict.fromkeys([str(r[0]).strip() for r in rows if r and r[0] and len(str(r[0]).strip()) == 6]))
+        total_len = len(unique_tickers)
+        
+        for idx, ticker in enumerate(unique_tickers):
+            progress_bar.progress((idx + 1) / total_len)
+            
+            df_stock = None
+            current_row = None
+            
+            # 💡 생성된 대량 데이터셋에서 .KS와 .KQ 중 데이터가 정상적으로 존재하는 유효 시장을 자동 판별합니다.
+            for suffix in [".KS", ".KQ"]:
+                target = ticker + suffix
+                current_row = ticker_to_row.get(target)
+                
+                if is_multi_index and (target in df_all.columns.levels[0]):
+                    df_candidate = df_all[target].dropna(subset=['Close'])
+                    if len(df_candidate) >= 224:
+                        df_stock = df_candidate
+                        break
+                elif not is_multi_index:
+                    df_candidate = df_all.dropna(subset=['Close'])
+                    if len(df_candidate) >= 224:
+                        df_stock = df_candidate
+                        break
+            
+            if df_stock is None or current_row is None:
+                continue
+                
+            name = current_row[1].strip()
+            status_text.text(f"초고속 연산 중 ({idx+1}/{total_len}): {name}")
             
             try:
-                # 멀티인덱스 구조인 경우 안전하게 슬라이싱
-                if is_multi_index and (yf_ticker in df_all.columns.levels[0]):
-                    df_stock = df_all[yf_ticker].dropna(subset=['Close'])
-                elif not is_multi_index and total_tickers == 1:
-                    df_stock = df_all.dropna(subset=['Close'])
-                else:
-                    continue
-                
-                if len(df_stock) < 224: 
-                    continue
-                
                 close_series = df_stock['Close']
                 vol_series = df_stock['Volume']
 
-                # 이평선 연산 (120일선, 224일선)
+                # 이평선 연산
                 ma120 = close_series.rolling(120).mean().iloc[-1]
                 ma224 = close_series.rolling(224).mean().iloc[-1]
                 upper_ma = max(ma120, ma224)
@@ -149,9 +149,9 @@ if btn_web or btn_tele:
                         '종목명': name, 
                         '현재가': f"{int(last_close):,}",
                         '거래량비율': f"{vol_ratio:.1f}%",
-                        '테마1': row[2].strip() if len(row) > 2 else "",
-                        '테마2': row[3].strip() if len(row) > 3 else "",
-                        '테마3': row[4].strip() if len(row) > 4 else ""
+                        '테마1': current_row[2].strip() if len(current_row) > 2 else "",
+                        '테마2': current_row[3].strip() if len(current_row) > 3 else "",
+                        '테마3': current_row[4].strip() if len(current_row) > 4 else ""
                     })
             except Exception:
                 continue
