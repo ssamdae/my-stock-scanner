@@ -1,9 +1,10 @@
 import streamlit as st
 import pandas as pd
-from datetime import datetime, timedelta
+from datetime import datetime
 import os
 import requests
-import yfinance as yf
+import xml.etree.ElementTree as ET  # 💡 네이버 대량 XML 데이터를 빛의 속도로 파싱할 엔진
+from concurrent.futures import ThreadPoolExecutor, as_completed
 
 # 1. 페이지 설정
 st.set_page_config(page_title="돌파", layout="wide")
@@ -21,6 +22,78 @@ def send_telegram_msg(message):
         return response.status_code == 200
     except Exception:
         return False
+
+
+# 💡 개별 종목 네이버 초고속 차트 API 수집 및 분석 워커 함수
+def analyze_single_stock_naver(row):
+    if not row or not row[0]: 
+        return None
+        
+    ticker = str(row[0]).strip()
+    if len(ticker) != 6 or not ticker.isdigit(): 
+        return None
+        
+    name = row[1].strip()
+    
+    # 💡 [핵심] 네이버 차트용 일별 데이터 주소 (최근 360 영업일 분량을 단 1방에 요청)
+    url = f"https://fchart.stock.naver.com/sise.nhn?symbol={ticker}&timeframe=day&count=360&requestType=0"
+    
+    try:
+        # 네이버 내부망이라 2초 타임아웃만 주어도 광속으로 응답합니다.
+        res = requests.get(url, timeout=2)
+        if res.status_code != 200: 
+            return None
+            
+        # XML 구조 고속 해체
+        root = ET.fromstring(res.text)
+        items = root.findall('.//item')
+        if len(items) < 224: 
+            return None
+            
+        data_list = []
+        for item in items:
+            data_str = item.get('data')
+            parts = data_str.split('|') # 형식: "날짜|시가|고가|저가|종가|거래량"
+            if len(parts) == 6:
+                data_list.append({
+                    'Close': float(parts[4]),
+                    'Volume': float(parts[5])
+                })
+        
+        df_stock = pd.DataFrame(data_list)
+        if len(df_stock) < 224: 
+            return None
+            
+        close_series = df_stock['Close']
+        vol_series = df_stock['Volume']
+
+        # 샌드위치 이평선 및 돌파 조건 연산
+        ma120 = close_series.rolling(120).mean().iloc[-1]
+        ma224 = close_series.rolling(224).mean().iloc[-1]
+        upper_ma = max(ma120, ma224)
+
+        prev_close = close_series.iloc[-2]
+        last_close = close_series.iloc[-1]
+        
+        prev_vol = vol_series.iloc[-2]
+        last_vol = vol_series.iloc[-1]
+        vol_ratio = (last_vol / prev_vol * 100) if prev_vol > 0 else 0
+
+        is_breakout = prev_close < upper_ma < last_close
+        is_vol_surge = vol_ratio >= 200
+
+        if is_breakout and is_vol_surge:
+            return {
+                '종목명': name, 
+                '현재가': f"{int(last_close):,}",
+                '거래량비율': f"{vol_ratio:.1f}%",
+                '테마1': row[2].strip() if len(row) > 2 else "",
+                '테마2': row[3].strip() if len(row) > 3 else "",
+                '테마3': row[4].strip() if len(row) > 4 else ""
+            }
+    except Exception:
+        pass
+    return None
 
 
 # 3. 분석 실행 버튼
@@ -44,141 +117,43 @@ if btn_web or btn_tele:
                 st.warning("분석할 종목 데이터가 없습니다.")
                 st.stop()
 
-        # 야후 파이낸스용 티커 배열 생성 (.KS / .KQ 듀얼 세팅)
-        yf_tickers = []
-        ticker_to_row = {}
-        requested_set = set()
-        
+        # 중복 종목 완벽 필터링 처리
+        unique_rows = []
+        seen_tickers = set()
         for row in rows:
             if not row or not row[0]: continue
             ticker = str(row[0]).strip()
-            
-            if len(ticker) != 6 or not ticker.isdigit(): 
-                continue
-            
-            for suffix in [".KS", ".KQ"]:
-                target = ticker + suffix
-                if target not in requested_set:
-                    yf_tickers.append(target)
-                    requested_set.add(target)
-                    ticker_to_row[target] = row
+            if len(ticker) == 6 and ticker.isdigit() and ticker not in seen_tickers:
+                seen_tickers.add(ticker)
+                unique_rows.append(row)
 
-        if not yf_tickers:
-            st.error("❌ CSV 파일에서 유효한 주식 티커를 찾지 못했습니다.")
-            st.stop()
-
-        # 💡 [핵심 개선 1] 944개 티커를 50개씩 안전하게 쪼개서 순차 다운로드 (데드락 원천 차단)
-        chunk_size = 50
-        ticker_chunks = [yf_tickers[i:i + chunk_size] for i in range(0, len(yf_tickers), chunk_size)]
-        
-        df_list = []
-        end_date_dt = datetime.now()
-        start_date_dt = end_date_dt - timedelta(days=360)
-        
-        total_chunks = len(ticker_chunks)
-        download_status = st.empty()
-        download_progress = st.progress(0)
-
-        for chunk_idx, chunk in enumerate(ticker_chunks):
-            # 다운로드 진행 상황을 실시간으로 화면에 노출하여 멈춤 여부 인지 가능하게 처리
-            download_status.info(f"🚀 야후 파이낸스 데이터 안전 다운로드 중 ({chunk_idx + 1}/{total_chunks} 그룹)...")
-            download_progress.progress((chunk_idx + 1) / total_chunks)
-            
-            try:
-                # 💡 [핵심 개선 2] threads=False 로 설정하여 1 OCPU 서버 락 현상 방지 및 10초 타임아웃 강제
-                df_chunk = yf.download(
-                    tickers=chunk,
-                    start=start_date_dt,
-                    end=end_date_dt,
-                    group_by='ticker',
-                    progress=False,
-                    threads=False,
-                    timeout=10
-                )
-                if df_chunk is not None and not df_chunk.empty:
-                    df_list.append(df_chunk)
-            except Exception:
-                # 특정 그룹에서 일시 에러가 나도 전체가 죽지 않고 패스하도록 방어
-                continue
-
-        download_status.empty()
-        download_progress.empty()
-
-        if not df_list:
-            st.error("❌ 야후 파이낸스로부터 데이터를 단 하나도 수집하지 못했습니다. 통신 상태를 확인해 주세요.")
-            st.stop()
-
-        # 💡 분할 다운로드된 데이터프레임들을 컬럼(옆) 방향으로 안전하게 병합
-        with st.spinner('📦 수집된 시장 데이터 통합 가공 중...'):
-            df_all = pd.concat(df_list, axis=1)
-
-        # 거대 DataFrame을 메모리 상에서 초고속 루프 연산
         matched = []
         progress_bar = st.progress(0)
         status_text = st.empty()
         
-        is_multi_index = isinstance(df_all.columns, pd.MultiIndex)
-        
-        unique_tickers = list(dict.fromkeys([str(r[0]).strip() for r in rows if r and r[0] and len(str(r[0]).strip()) == 6]))
-        total_len = len(unique_tickers)
-        
-        for idx, ticker in enumerate(unique_tickers):
-            progress_bar.progress((idx + 1) / total_len)
+        total_len = len(unique_rows)
+        st.info(f"⚡ 외부 락 유발 라이브러리 전면 제거 완료. 네이버 fchart망을 통해 {total_len}개 종목 스캔을 전개합니다.")
+
+        # 💡 [핵심] 네이버 전용망은 트래픽 수용량이 크므로 스레드 15개를 동시 가동해 3초대 컷을 냅니다.
+        with ThreadPoolExecutor(max_workers=15) as executor:
+            futures = {executor.submit(analyze_single_stock_naver, row): row for row in unique_rows}
             
-            df_stock = None
-            current_row = None
-            
-            for suffix in [".KS", ".KQ"]:
-                target = ticker + suffix
-                current_row = ticker_to_row.get(target)
+            completed_count = 0
+            for future in as_completed(futures):
+                completed_count += 1
+                row = futures[future]
+                name = row[1].strip() if len(row) > 1 else "Unknown"
                 
-                if is_multi_index and (target in df_all.columns.levels[0]):
-                    df_candidate = df_all[target].dropna(subset=['Close'])
-                    if len(df_candidate) >= 224:
-                        df_stock = df_candidate
-                        break
-                elif not is_multi_index:
-                    df_candidate = df_all.dropna(subset=['Close'])
-                    if len(df_candidate) >= 224:
-                        df_stock = df_candidate
-                        break
-            
-            if df_stock is None or current_row is None:
-                continue
+                # 메인 UI 실시간 스크롤
+                progress_bar.progress(completed_count / total_len)
+                status_text.text(f"네이버 실시간 주가 검증 중 ({completed_count}/{total_len}): {name}")
                 
-            name = current_row[1].strip()
-            status_text.text(f"초고속 연산 중 ({idx+1}/{total_len}): {name}")
-            
-            try:
-                close_series = df_stock['Close']
-                vol_series = df_stock['Volume']
-
-                # 이평선 연산
-                ma120 = close_series.rolling(120).mean().iloc[-1]
-                ma224 = close_series.rolling(224).mean().iloc[-1]
-                upper_ma = max(ma120, ma224)
-
-                prev_close = close_series.iloc[-2]
-                last_close = close_series.iloc[-1]
-                
-                prev_vol = vol_series.iloc[-2]
-                last_vol = vol_series.iloc[-1]
-                vol_ratio = (last_vol / prev_vol * 100) if prev_vol > 0 else 0
-
-                is_breakout = prev_close < upper_ma < last_close
-                is_vol_surge = vol_ratio >= 200
-
-                if is_breakout and is_vol_surge:
-                    matched.append({
-                        '종목명': name, 
-                        '현재가': f"{int(last_close):,}",
-                        '거래량비율': f"{vol_ratio:.1f}%",
-                        '테마1': current_row[2].strip() if len(current_row) > 2 else "",
-                        '테마2': current_row[3].strip() if len(current_row) > 3 else "",
-                        '테마3': current_row[4].strip() if len(current_row) > 4 else ""
-                    })
-            except Exception:
-                continue
+                try:
+                    result = future.result()
+                    if result is not None:
+                        matched.append(result)
+                except Exception:
+                    pass
 
         status_text.empty()
         progress_bar.empty()
@@ -194,7 +169,6 @@ if btn_web or btn_tele:
             
             st.success(f"✅ 총 {len(res_df)}개의 돌파 종목 발견! (기준일: {datetime.now().strftime('%Y%m%d')})")
             
-            # 웹 화면 표시
             display_df = res_df[['종목명', '현재가', '거래량비율', '테마1', '테마2', '테마3']]
             st.dataframe(display_df, use_container_width=True, hide_index=True)
 
@@ -211,7 +185,7 @@ if btn_web or btn_tele:
                 if send_telegram_msg(msg):
                     st.toast("텔레그램 전송 완료!")
                 else:
-                    st.error("텔레그램 전송 실패")
+                    st.error("텔레error람 전송 실패")
         else:
             st.warning("조건(돌파 + 거래량 2배)에 맞는 종목이 없습니다.")
 
