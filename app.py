@@ -44,10 +44,7 @@ if btn_web or btn_tele:
                 st.warning("분석할 종목 데이터가 없습니다.")
                 st.stop()
 
-        with st.spinner('시장 데이터 동기화 중...'):
-            kospi_tickers = set()
-
-        # 야후 파이낸스용 일괄 요청 티커 배열 만들기
+        # 야후 파이낸스용 티커 배열 생성 (.KS / .KQ 듀얼 세팅)
         yf_tickers = []
         ticker_to_row = {}
         requested_set = set()
@@ -70,22 +67,50 @@ if btn_web or btn_tele:
             st.error("❌ CSV 파일에서 유효한 주식 티커를 찾지 못했습니다.")
             st.stop()
 
-        # 데이터 다운로드 실행 (360일 최적화 세팅)
-        with st.spinner(f'🚀 야후 파이낸스에서 {len(yf_tickers) // 2}개 종목 데이터 일괄 다운로드 중...'):
-            end_date_dt = datetime.now()
-            start_date_dt = end_date_dt - timedelta(days=360)
-            
-            df_all = yf.download(
-                tickers=yf_tickers,
-                start=start_date_dt,
-                end=end_date_dt,
-                group_by='ticker',
-                progress=False
-            )
+        # 💡 [핵심 개선 1] 944개 티커를 50개씩 안전하게 쪼개서 순차 다운로드 (데드락 원천 차단)
+        chunk_size = 50
+        ticker_chunks = [yf_tickers[i:i + chunk_size] for i in range(0, len(yf_tickers), chunk_size)]
+        
+        df_list = []
+        end_date_dt = datetime.now()
+        start_date_dt = end_date_dt - timedelta(days=360)
+        
+        total_chunks = len(ticker_chunks)
+        download_status = st.empty()
+        download_progress = st.progress(0)
 
-        if df_all is None or df_all.empty:
-            st.error("❌ 야후 파이낸스로부터 데이터를 수집하지 못했습니다.")
+        for chunk_idx, chunk in enumerate(ticker_chunks):
+            # 다운로드 진행 상황을 실시간으로 화면에 노출하여 멈춤 여부 인지 가능하게 처리
+            download_status.info(f"🚀 야후 파이낸스 데이터 안전 다운로드 중 ({chunk_idx + 1}/{total_chunks} 그룹)...")
+            download_progress.progress((chunk_idx + 1) / total_chunks)
+            
+            try:
+                # 💡 [핵심 개선 2] threads=False 로 설정하여 1 OCPU 서버 락 현상 방지 및 10초 타임아웃 강제
+                df_chunk = yf.download(
+                    tickers=chunk,
+                    start=start_date_dt,
+                    end=end_date_dt,
+                    group_by='ticker',
+                    progress=False,
+                    threads=False,
+                    timeout=10
+                )
+                if df_chunk is not None and not df_chunk.empty:
+                    df_list.append(df_chunk)
+            except Exception:
+                # 특정 그룹에서 일시 에러가 나도 전체가 죽지 않고 패스하도록 방어
+                continue
+
+        download_status.empty()
+        download_progress.empty()
+
+        if not df_list:
+            st.error("❌ 야후 파이낸스로부터 데이터를 단 하나도 수집하지 못했습니다. 통신 상태를 확인해 주세요.")
             st.stop()
+
+        # 💡 분할 다운로드된 데이터프레임들을 컬럼(옆) 방향으로 안전하게 병합
+        with st.spinner('📦 수집된 시장 데이터 통합 가공 중...'):
+            df_all = pd.concat(df_list, axis=1)
 
         # 거대 DataFrame을 메모리 상에서 초고속 루프 연산
         matched = []
