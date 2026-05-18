@@ -5,7 +5,7 @@ from datetime import datetime
 import xml.etree.ElementTree as ET
 from concurrent.futures import ThreadPoolExecutor, as_completed
 
-# 💡 스트림릿에 등록해둔 텔레그램 비밀키를 그대로 공유해서 읽어오는 함수
+# 스트림릿에 등록해둔 텔레그램 비밀키를 그대로 공유해서 읽어오는 함수
 def get_secrets():
     secrets = {}
     path = os.path.expanduser("~/my-stock-scanner/.streamlit/secrets.toml")
@@ -127,11 +127,11 @@ def main():
     if matched:
         res_df = pd.DataFrame(matched)
         for t in ['테마1', '테마2', '테마3']:
-            if t in res_df.columns:
-                counts = res_df[res_df[t] != ''][t].value_counts()
-                res_df[f'{t}_빈도'] = res_df[t].map(counts).fillna(0)
+            counts = res_df[res_df[t] != ''][t].value_counts()
+            res_df[f'{t}_빈도'] = res_df[t].map(counts).fillna(0)
         
-        res_df = res_df.sort_values(by=['테마1_빈度' if '테마1_빈도' in res_df.columns else '종목명', '종목명'], ascending=[False, True])
+        # 💡 [오타 완벽 수정] 한자 '度'를 한글 '도'로 완전히 박멸하고 정렬 기준을 웹(app.py)과 백인해 정렬을 맞췄습니다.
+        res_df = res_df.sort_values(by=['테마1_빈도', '테마1', '테마2_빈도', '테마2', '테마3_빈도', '종목명'], ascending=[False, True, False, True, False, True])
         
         today_str = datetime.now().strftime('%Y-%m-%d')
         msg = f"<b>⏰ [정시 자동 스캔 리포트: {today_str}]</b>\n"
