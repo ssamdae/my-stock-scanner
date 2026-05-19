@@ -9,7 +9,7 @@ from concurrent.futures import ThreadPoolExecutor, as_completed
 # 1. 페이지 설정
 st.set_page_config(page_title="코스피/코스닥 돌파 스캐너", layout="wide")
 st.title("🚀 순수 주식 실시간 돌파 레이더")
-st.caption("KOSPI/KOSDAQ 전체 종목 중 파생상품(ETF/ETN), 리츠, 우선주, 스팩을 제외한 순수 주식만 실시간 스캔합니다.")
+st.caption("KOSPI/KOSDAQ 전체 종목 중 자산운용사 ETF 브랜드, 파생상품, 리츠, 우선주, 스팩을 완벽하게 필터링합니다.")
 
 # 2. 텔레그램 전송 함수
 def send_telegram_msg(message):
@@ -23,9 +23,18 @@ def send_telegram_msg(message):
     except Exception:
         return False
 
-# 💡 [필터 보정 완료] 웹에서도 ETF, ETN, 리츠, 우선주 등을 완벽 차단
+# 💡 [초강력 필터 보정] 웹 대시보드에서도 ETF 브랜드 및 파생상품 완벽 제거
 def get_all_tickers_naver():
     tickers = []
+    
+    blacklist = (
+        "KODEX", "TIGER", "RISE", "ACE", "ARIRANG", "KBSTAR", 
+        "HANARO", "KOSEF", "SOL", "KOACT", "TIMEFOLIO", "PLUS", 
+        "WON", "마이티", "히어로즈", "TREX", "UNICORN", 
+        "ETF", "ETN", "리츠", "REIT", "스팩", "인프라", "펀드", "투자회사",
+        "(H)", "(합성)", "레버리지", "인버스", "선물", "콜", "풋"
+    )
+
     # sosok 0: KOSPI, 1: KOSDAQ
     for sosok in [0, 1]:
         for page in range(1, 45): 
@@ -41,13 +50,13 @@ def get_all_tickers_naver():
                         ticker = href.split('code=')[-1]
                         name = link.text.strip()
                         
-                        # ❌ [노이즈 방어벽] 순수 기업 주식만 패스
-                        if "스팩" in name: continue
-                        if name.endswith("우") or name.endswith("우B") or name.endswith("우C"): continue
-                        if "ETF" in name or "ETN" in name: continue
-                        if "리츠" in name or "REIT" in name: continue
-                        if "인프라" in name or "펀드" in name: continue
-                        if "투자회사" in name: continue
+                        # ❌ [1차 방어벽] 우선주 제거
+                        if name.endswith("우") or name.endswith("우B") or name.endswith("우C"): 
+                            continue
+                            
+                        # ❌ [2차 방어벽] 블랙리스트 포함 항목 제거
+                        if any(bad_word in name for bad_word in blacklist):
+                            continue
                         
                         tickers.append((ticker, name))
             except Exception:
