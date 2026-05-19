@@ -29,9 +29,19 @@ def send_telegram_msg(message, token, chat_id):
     except Exception:
         return False
 
-# 💡 [필터 보정 완료] ETF, ETN, 리츠, 인프라 등 노이즈 상품을 제거하고 순수 주식만 수집
+# 💡 [초강력 필터 보정] 국내 모든 ETF 브랜드 및 파생상품 키워드 완벽 차단
 def get_all_tickers_naver():
     tickers = []
+    
+    # 🚫 차단할 키워드 블랙리스트 (운용사 브랜드 + 파생/리츠 용어 총망라)
+    blacklist = (
+        "KODEX", "TIGER", "RISE", "ACE", "ARIRANG", "KBSTAR", 
+        "HANARO", "KOSEF", "SOL", "KOACT", "TIMEFOLIO", "PLUS", 
+        "WON", "마이티", "히어로즈", "TREX", "UNICORN", 
+        "ETF", "ETN", "리츠", "REIT", "스팩", "인프라", "펀드", "투자회사",
+        "(H)", "(합성)", "레버리지", "인버스", "선물", "콜", "풋"
+    )
+
     # sosok 0: KOSPI, 1: KOSDAQ
     for sosok in [0, 1]:
         for page in range(1, 45): 
@@ -50,13 +60,13 @@ def get_all_tickers_naver():
                         ticker = href.split('code=')[-1]
                         name = link.text.strip()
                         
-                        # ❌ [노이즈 방어벽] 순수 코스피/코스닥 기업 주식이 아닌 항목들 완벽 차단
-                        if "스팩" in name: continue
-                        if name.endswith("우") or name.endswith("우B") or name.endswith("우C"): continue # 우선주 제거
-                        if "ETF" in name or "ETN" in name: continue # 파생상품 제거
-                        if "리츠" in name or "REIT" in name: continue # 부동산 리츠 제거
-                        if "인프라" in name or "펀드" in name: continue # 인프라/뮤추얼 펀드 제거
-                        if "투자회사" in name: continue
+                        # ❌ [1차 방어벽] 우선주 제거
+                        if name.endswith("우") or name.endswith("우B") or name.endswith("우C"): 
+                            continue
+                            
+                        # ❌ [2차 방어벽] 블랙리스트 단어가 이름에 포함되면 즉시 제외
+                        if any(bad_word in name for bad_word in blacklist):
+                            continue
                         
                         tickers.append((ticker, name))
             except Exception:
