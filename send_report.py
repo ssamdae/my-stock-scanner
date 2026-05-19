@@ -29,7 +29,7 @@ def send_telegram_msg(message, token, chat_id):
     except Exception:
         return False
 
-# 네이버 금융에서 KOSPI/KOSDAQ 전체 종목 실시간 스크래핑
+# 💡 [필터 보정 완료] ETF, ETN, 리츠, 인프라 등 노이즈 상품을 제거하고 순수 주식만 수집
 def get_all_tickers_naver():
     tickers = []
     # sosok 0: KOSPI, 1: KOSDAQ
@@ -49,8 +49,16 @@ def get_all_tickers_naver():
                     if href and 'code=' in href:
                         ticker = href.split('code=')[-1]
                         name = link.text.strip()
-                        if "스팩" not in name and not name.endswith("우") and not name.endswith("우B"):
-                            tickers.append((ticker, name))
+                        
+                        # ❌ [노이즈 방어벽] 순수 코스피/코스닥 기업 주식이 아닌 항목들 완벽 차단
+                        if "스팩" in name: continue
+                        if name.endswith("우") or name.endswith("우B") or name.endswith("우C"): continue # 우선주 제거
+                        if "ETF" in name or "ETN" in name: continue # 파생상품 제거
+                        if "리츠" in name or "REIT" in name: continue # 부동산 리츠 제거
+                        if "인프라" in name or "펀드" in name: continue # 인프라/뮤추얼 펀드 제거
+                        if "투자회사" in name: continue
+                        
+                        tickers.append((ticker, name))
             except Exception:
                 continue
     return tickers
@@ -108,7 +116,7 @@ def analyze_single_stock_naver(item):
     return None
 
 def main():
-    print(f"[{datetime.now().strftime('%Y-%m-%d %H:%M:%S')}] KOSPI/KOSDAQ 전 종목 스캔 가동...")
+    print(f"[{datetime.now().strftime('%Y-%m-%d %H:%M:%S')}] 코스피/코스닥 순수 주식 스캔 가동...")
     secrets = get_secrets()
     token = secrets.get("bot_token")
     chat_id = secrets.get("chat_id")
@@ -118,7 +126,7 @@ def main():
         print("❌ 네이버 금융에서 종목 리스트를 가져오지 못했습니다.")
         return
         
-    print(f"✅ 총 {len(market_tickers)}개 종목 수집 완료. 정밀 이평선 연산 시작...")
+    print(f"✅ 총 {len(market_tickers)}개 순수 주식 종목 수집 완료. 정밀 이평선 연산 시작...")
 
     matched = []
     with ThreadPoolExecutor(max_workers=20) as executor:
@@ -133,13 +141,12 @@ def main():
 
     today_str = datetime.now().strftime('%Y-%m-%d')
 
-    # 💡 [핵심 보정] 조건 충족 종목 존재 여부에 상관없이 무조건 기본 타이틀 메시지를 전송합니다.
     if matched:
         res_df = pd.DataFrame(matched)
         res_df = res_df.sort_values(by='거래량비율', ascending=False)
         
-        msg = f"<b>⏰ [전 종목 자동 스캔 리포트: {today_str}]</b>\n"
-        msg += f"상단 이평선 돌파 + 거래량 200%↑ (스팩/우선주 제외)\n"
+        msg = f"<b>⏰ [순수 주식 자동 스캔 리포트: {today_str}]</b>\n"
+        msg += f"상단 이평선 돌파 + 거래량 200%↑ (ETF/ETN/리츠/우선주 제외)\n"
         msg += f"총 <b>{len(res_df)}건</b>\n\n"
         
         for _, r in res_df.iterrows():
@@ -151,9 +158,8 @@ def main():
             print("❌ 텔레그램 알림 발송 실패")
             
     else:
-        # 💡 [핵심 추가] 포착 종목이 0건일 때 전송할 안심 생존 보고 메시지
-        msg = f"<b>⏰ [전 종목 자동 스캔 리포트: {today_str}]</b>\n"
-        msg += f"상단 이평선 돌파 + 거래량 200%↑ (스팩/우선주 제외)\n\n"
+        msg = f"<b>⏰ [순수 주식 자동 스캔 리포트: {today_str}]</b>\n"
+        msg += f"상단 이평선 돌파 + 거래량 200%↑ (ETF/ETN/리츠/우선주 제외)\n\n"
         msg += "💡 현재 조건에 일치하는 돌파 종목이 존재하지 않습니다."
         
         if send_telegram_msg(msg, token, chat_id):
