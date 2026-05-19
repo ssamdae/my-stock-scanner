@@ -3,9 +3,10 @@ import requests
 import pandas as pd
 from datetime import datetime
 import xml.etree.ElementTree as ET
+from bs4 import BeautifulSoup
 from concurrent.futures import ThreadPoolExecutor, as_completed
 
-# 스트림릿에 등록해둔 텔레그램 비밀키를 그대로 공유해서 읽어오는 함수
+# 1. 텔레그램 비밀키 호출
 def get_secrets():
     secrets = {}
     path = os.path.expanduser("~/my-stock-scanner/.streamlit/secrets.toml")
@@ -17,27 +18,48 @@ def get_secrets():
                     secrets[k.strip()] = v.strip().strip('"').strip("'")
     return secrets
 
-# 텔레그램 전송 함수
 def send_telegram_msg(message, token, chat_id):
     if not token or not chat_id:
-        print("❌ 텔레그램 토큰 또는 챗 ID가 등록되어 있지 않습니다.")
         return False
     url = f"https://api.telegram.org/bot{token}/sendMessage"
     payload = {"chat_id": chat_id, "text": message, "parse_mode": "HTML"}
     try:
         res = requests.post(url, data=payload, timeout=5)
         return res.status_code == 200
-    except Exception as e:
-        print(f"❌ 텔레그램 전송 중 오류 발생: {str(e)}")
+    except Exception:
         return False
 
-# 네이버 fchart 분석 워커
-def analyze_single_stock_naver(row):
-    if not row or not row[0]: return None
-    ticker = str(row[0]).strip()
-    if len(ticker) != 6 or not ticker.isdigit(): return None
-    name = row[1].strip()
-    
+# 💡 [핵심 추가] 네이버 금융에서 KOSPI/KOSDAQ 전체 종목 실시간 스크래핑
+def get_all_tickers_naver():
+    tickers = []
+    # sosok 0: KOSPI, 1: KOSDAQ
+    for sosok in [0, 1]:
+        for page in range(1, 45): # 시가총액 페이지 순회 (보통 40페이지 내외)
+            url = f"https://finance.naver.com/sise/sise_market_sum.naver?sosok={sosok}&page={page}"
+            try:
+                res = requests.get(url, timeout=5)
+                soup = BeautifulSoup(res.text, 'html.parser')
+                links = soup.select('a.tltle')
+                
+                # 해당 페이지에 종목 링크가 없으면 마지막 페이지로 간주하고 다음 시장으로 넘어감
+                if not links:
+                    break
+                    
+                for link in links:
+                    href = link.get('href')
+                    if href and 'code=' in href:
+                        ticker = href.split('code=')[-1]
+                        name = link.text.strip()
+                        # 스팩주, 우선주 등 기본 필터링 (필요시 정교화 가능)
+                        if "스팩" not in name and not name.endswith("우") and not name.endswith("우B"):
+                            tickers.append((ticker, name))
+            except Exception:
+                continue
+    return tickers
+
+# 2. 네이버 fchart 분석 워커 (테마 제외)
+def analyze_single_stock_naver(item):
+    ticker, name = item
     url = f"https://fchart.stock.naver.com/sise.nhn?symbol={ticker}&timeframe=day&count=360&requestType=0"
     try:
         res = requests.get(url, timeout=2)
@@ -81,41 +103,30 @@ def analyze_single_stock_naver(row):
             return {
                 '종목명': name, 
                 '현재가': f"{int(last_close):,}",
-                '거래량비율': f"{vol_ratio:.1f}%",
-                '테마1': row[2].strip() if len(row) > 2 else "",
-                '테마2': row[3].strip() if len(row) > 3 else "",
-                '테마3': row[4].strip() if len(row) > 4 else ""
+                '거래량비율': float(vol_ratio)  # 정렬을 위해 float 타입으로 저장
             }
     except Exception:
         pass
     return None
 
 def main():
-    print(f"[{datetime.now().strftime('%Y-%m-%d %H:%M:%S')}] 스케줄러 자동 스캔 가동...")
+    print(f"[{datetime.now().strftime('%Y-%m-%d %H:%M:%S')}] KOSPI/KOSDAQ 전 종목 스캔 가동...")
     secrets = get_secrets()
     token = secrets.get("bot_token")
     chat_id = secrets.get("chat_id")
     
-    csv_path = os.path.expanduser("~/my-stock-scanner/watchlist.csv")
-    if not os.path.exists(csv_path):
-        print("❌ 스캐너 실행 실패: watchlist.csv 파일이 없습니다.")
+    # 동적 전체 종목 수집
+    market_tickers = get_all_tickers_naver()
+    if not market_tickers:
+        print("❌ 네이버 금융에서 종목 리스트를 가져오지 못했습니다.")
         return
         
-    df_stocks = pd.read_csv(csv_path, dtype={'티커': str}, encoding='utf-8-sig').fillna('')
-    rows = df_stocks.values.tolist()
-    
-    unique_rows = []
-    seen_tickers = set()
-    for row in rows:
-        if not row or not row[0]: continue
-        ticker = str(row[0]).strip()
-        if len(ticker) == 6 and ticker.isdigit() and ticker not in seen_tickers:
-            seen_tickers.add(ticker)
-            unique_rows.append(row)
-            
+    print(f"✅ 총 {len(market_tickers)}개 종목 수집 완료. 정밀 이평선 연산 시작...")
+
     matched = []
-    with ThreadPoolExecutor(max_workers=15) as executor:
-        futures = {executor.submit(analyze_single_stock_naver, r): r for r in unique_rows}
+    # 2,600개 종목이므로 스레드를 20개로 소폭 늘려 속도 최적화
+    with ThreadPoolExecutor(max_workers=20) as executor:
+        futures = {executor.submit(analyze_single_stock_naver, item): item for item in market_tickers}
         for future in as_completed(futures):
             try:
                 result = future.result()
@@ -126,22 +137,17 @@ def main():
 
     if matched:
         res_df = pd.DataFrame(matched)
-        for t in ['테마1', '테마2', '테마3']:
-            counts = res_df[res_df[t] != ''][t].value_counts()
-            res_df[f'{t}_빈도'] = res_df[t].map(counts).fillna(0)
         
-        # 💡 [오타 완벽 수정] 한자 '度'를 한글 '도'로 완전히 박멸하고 정렬 기준을 웹(app.py)과 백인해 정렬을 맞췄습니다.
-        res_df = res_df.sort_values(by=['테마1_빈도', '테마1', '테마2_빈도', '테마2', '테마3_빈도', '종목명'], ascending=[False, True, False, True, False, True])
+        # 거래량이 가장 폭발적으로 터진 종목부터 내림차순 정렬
+        res_df = res_df.sort_values(by='거래량비율', ascending=False)
         
         today_str = datetime.now().strftime('%Y-%m-%d')
-        msg = f"<b>⏰ [정시 자동 스캔 리포트: {today_str}]</b>\n"
-        msg += f"상단 이평선 돌파 + 거래량 200%↑ 포착 결과\n"
+        msg = f"<b>⏰ [전 종목 자동 스캔 리포트: {today_str}]</b>\n"
+        msg += f"상단 이평선 돌파 + 거래량 200%↑ (스팩/우선주 제외)\n"
         msg += f"총 <b>{len(res_df)}건</b>\n\n"
         
         for _, r in res_df.iterrows():
-            theme_list = [t for t in [r['테마1'], r['테마2'], r['테마3']] if t.strip()]
-            theme_str = ", ".join(theme_list)
-            msg += f"• <b>{r['종목명']}</b> (🔥{r['거래량비율']}) | {theme_str}\n"
+            msg += f"• <b>{r['종목명']}</b> (🔥{r['거래량비율']:.1f}%)\n"
         
         if send_telegram_msg(msg, token, chat_id):
             print(f"✅ 텔레그램 알림 발송 완료 ({len(res_df)}건)")
